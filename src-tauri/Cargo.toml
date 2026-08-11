@@ -1,0 +1,26 @@
+[package]
+name = "pdf-next"
+version = "0.1.0"
+description = "Tiny, fast PDF and PNG viewer that reloads when the file changes"
+authors = ["Ricardo Frantz"]
+license = "MIT"
+repository = "https://github.com/ricardofrantz/pdf-next"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Small and fast beats fast-to-build: this binary is shipped, not iterated on.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

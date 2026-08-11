@@ -1,0 +1,15 @@
+{
+  "name": "pdf-next",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tiny, fast PDF and PNG viewer that reloads when the file changes",
+  "license": "MIT",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icons": "tauri icon assets/app-icon.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

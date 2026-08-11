@@ -1,0 +1,424 @@
+/* Light is the base set; dark redefines tokens only, so the app follows the OS
+   without any duplicated component rules. */
+:root {
+  color-scheme: light dark;
+
+  --bg: #f3f4f6;
+  --chrome: #fbfbfc;
+  --desk: #e7e9ec;
+  --fg: #1c2024;
+  --fg-dim: #616b76;
+  --rule: #d6dae0;
+  --sep: #c9cfd6;
+  --input-bg: #ffffff;
+  --input-border: #c4cad1;
+  --hover: #b9c0c959;
+  --active: #a8b1bb78;
+  --accent: #005fb8;
+  --widget: #ffffff;
+  --widget-border: #c2c8cf;
+  --shadow: rgb(0 0 0 / 0.18);
+  --live: #1a7f4b;
+  --error: #c4241a;
+  --page-ring: 30%;
+
+  --bar-height: 36px;
+  --control-height: 26px;
+  --ui-font: "Segoe UI", -apple-system, "Ubuntu", system-ui, sans-serif;
+}
+
+/* The shell stamps data-theme from the OS because WebView2 does not resolve
+   prefers-color-scheme by itself; the media query covers the other webviews. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #1f1f1f;
+  --chrome: #181818;
+  --desk: #262626;
+  --fg: #cccccc;
+  --fg-dim: #9d9d9d;
+  --rule: #2e2e2e;
+  --sep: #3a3a3a;
+  --input-bg: #313131;
+  --input-border: #3d3d3d;
+  --hover: #ffffff17;
+  --active: #ffffff2b;
+  --accent: #4daafc;
+  --widget: #202020;
+  --widget-border: #454545;
+  --shadow: rgb(0 0 0 / 0.5);
+  --live: #6fce9d;
+  --error: #f0877a;
+  --page-ring: 26%;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #1f1f1f;
+    --chrome: #181818;
+    --desk: #262626;
+    --fg: #cccccc;
+    --fg-dim: #9d9d9d;
+    --rule: #2e2e2e;
+    --sep: #3a3a3a;
+    --input-bg: #313131;
+    --input-border: #3d3d3d;
+    --hover: #ffffff17;
+    --active: #ffffff2b;
+    --accent: #4daafc;
+    --widget: #202020;
+    --widget-border: #454545;
+    --shadow: rgb(0 0 0 / 0.5);
+    --live: #6fce9d;
+    --error: #f0877a;
+    --page-ring: 26%;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--ui-font);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--chrome);
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.dim {
+  color: var(--fg-dim);
+}
+
+/* ── Toolbar ─────────────────────────────────────────────────────────── */
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--bar-height);
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--chrome);
+  white-space: nowrap;
+}
+
+.group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 6px;
+  background: var(--sep);
+  flex: 0 0 auto;
+}
+
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height);
+  min-width: var(--control-height);
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+button:active:not(:disabled) {
+  background: var(--active);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button.on {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 62%, transparent);
+}
+
+.icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+input,
+select {
+  height: var(--control-height);
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+input {
+  padding: 0 6px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+select {
+  padding: 0 4px;
+  min-width: 88px;
+}
+
+#page {
+  width: 48px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+}
+
+#page::-webkit-inner-spin-button,
+#page::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+#pages {
+  padding: 0 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Live-reload indicator: green while watching, amber while the file is gone
+   mid-build, so a stalled build is visible without reading any text. */
+#live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+#live .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--live);
+}
+
+body.file-missing #live .dot {
+  background: var(--error);
+}
+
+body.file-missing #live {
+  color: var(--error);
+}
+
+body:not(.has-file) #live {
+  display: none;
+}
+
+/* ── Stage ───────────────────────────────────────────────────────────── */
+#stage {
+  position: absolute;
+  top: var(--bar-height);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--desk);
+}
+
+#viewerContainer {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  outline: none;
+  scrollbar-width: thin;
+}
+
+#viewerContainer:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+body:not(.kind-pdf) #viewerContainer {
+  display: none;
+}
+
+#imageStage {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+#image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--fg) var(--page-ring), transparent),
+    0 2px 14px var(--shadow);
+}
+
+body.mode-invert #image {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+/* PDF.js renders pages without an edge; give them one in every mode. */
+.pdfViewer {
+  --page-bg-color: #fff;
+  padding: 12px 0;
+}
+
+.pdfViewer .page {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--fg) var(--page-ring), transparent),
+    0 2px 12px var(--shadow);
+}
+
+body.mode-night .pdfViewer {
+  --page-bg-color: #1b1b1b;
+}
+
+body.mode-sepia .pdfViewer {
+  --page-bg-color: #f4ecd8;
+}
+
+body.mode-invert .pdfViewer .page .canvasWrapper {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+.textLayer .highlight {
+  --highlight-bg-color: rgb(255 213 74 / 0.95);
+  --highlight-selected-bg-color: rgb(255 128 42 / 0.98);
+}
+
+/* ── Find bar ────────────────────────────────────────────────────────── */
+#find {
+  position: absolute;
+  top: 10px;
+  right: 16px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--widget-border);
+  border-radius: 4px;
+  background: var(--widget);
+  box-shadow: 0 4px 16px var(--shadow);
+}
+
+#find[hidden] {
+  display: none;
+}
+
+#findInput {
+  width: 150px;
+}
+
+#findCount {
+  min-width: 46px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Status and empty state ──────────────────────────────────────────── */
+#status {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  z-index: 5;
+  max-width: min(80%, 560px);
+  padding: 4px 12px;
+  border: 1px solid var(--widget-border);
+  border-radius: 4px;
+  background: var(--widget);
+  box-shadow: 0 4px 16px var(--shadow);
+  opacity: 0;
+  visibility: hidden;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transform: translateX(-50%);
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+#status.on {
+  opacity: 1;
+  visibility: visible;
+}
+
+#status.error {
+  color: var(--error);
+}
+
+#empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  text-align: center;
+}
+
+body.has-file #empty {
+  display: none;
+}
+
+body:not(.kind-image) #imageStage {
+  display: none;
+}
+
+body:not(.kind-pdf) .pdf-only {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}
