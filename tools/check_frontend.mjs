@@ -67,10 +67,20 @@ assert.match(
   /sepia: \{ background: '#f4ecd8', foreground: '#5b4636' \}/,
   'Sepia mode page colors must stay as tuned.',
 );
-assert.doesNotMatch(
+assert.match(
   app,
-  /const PAGE_MODES = \[[^\]]*'clear'/,
-  'The mode cycle must not land on plain pages; clearing is Shift+click.',
+  /const MODE_CYCLE = \[null, 'night', 'invert', 'sepia'\];/,
+  'Plain pages are a stop on the cycle, so white is always one press away.',
+);
+// Page colors live in the canvas pixels, so a color change is only visible
+// once the canvas is drawn again. refresh() is not that: it goes through
+// PDFPageView.update(), which resets with keepCanvasWrapper and never calls
+// _resetCanvas(), leaving the old bitmap. That showed up as a white page with
+// brown text on the way out of sepia.
+assert.match(
+  app,
+  /function applyPageColors\(\)[\s\S]*?pageView\.reset\(\);[\s\S]*?pdfViewer\.update\(\)/,
+  'A page-color change must drop each page canvas, or the previous colors stay.',
 );
 
 // Inverting the whole page also inverts the text layer and its highlights.

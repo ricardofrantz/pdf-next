@@ -53,8 +53,9 @@ that survives a build deleting and recreating the file mid-compile.
   press.
 - **PDF and images.** `.pdf`, plus `.png`, `.jpg`, `.webp` and `.avif`. Images zoom too, with the
   same control and keys as a PDF.
-- **Follows your system dark mode**, and can recolour PDF pages themselves: night, sepia, or a
-  full invert for scans. Shift+click the mode button to go back to plain pages.
+- **Follows your system dark mode**, and can recolour PDF pages themselves. The mode button
+  cycles Clear → Night → Invert → Sepia, so plain white pages are always one press away;
+  Shift+click it to jump straight back to Clear from anywhere.
 - **Text search** with match counts, powered by PDF.js.
 - **Keyboard first:** `j`/`k` scroll, `n`/`p` pages, `g`/`G` first and last, `+`/`-` zoom,
   `←`/`→` tabs (or folder, with one file open), `Ctrl+W` close, `Ctrl+F` find, `Ctrl+R` reload,

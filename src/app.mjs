@@ -23,6 +23,9 @@ GlobalWorkerOptions.workerSrc = './vendor/pdfjs/build/pdf.worker.min.mjs';
 const MAX_CANVAS_PIXELS = 4_194_304;
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6];
 const PAGE_MODES = ['night', 'sepia', 'invert'];
+// null is plain pages: a real stop, so white is always one press away rather
+// than something you have to know a modifier for.
+const MODE_CYCLE = [null, 'night', 'invert', 'sepia'];
 const PAGE_COLORS = {
   night: { background: '#1b1b1b', foreground: '#d6d1c4' },
   sepia: { background: '#f4ecd8', foreground: '#5b4636' },
@@ -914,18 +917,29 @@ function applyZoomChoice(value) {
 
 // ── Page modes ────────────────────────────────────────────────────────────
 
+/// Page colors are drawn into the page canvas, not laid over it, so changing
+/// them only shows once the canvas is drawn again. Setting the colors and
+/// calling refresh() is not that: refresh() goes through PDFPageView.update(),
+/// which — with the page geometry unchanged — resets with keepCanvasWrapper
+/// and never calls _resetCanvas(). The old bitmap stays, so leaving sepia used
+/// to give a white page with brown text. Dropping each canvas is the fix.
 function applyPageColors() {
   const pageColors = PAGE_COLORS[state.mode] || null;
   pdfViewer.pageColors = pageColors;
   const pages = pdfViewer._pages;
-  if (Array.isArray(pages)) {
-    for (const pageView of pages) {
-      pageView.pageColors = pageColors;
-    }
-    if (state.document) {
-      pdfViewer.refresh();
+  if (!Array.isArray(pages) || !state.document) {
+    return;
+  }
+  for (const pageView of pages) {
+    pageView.pageColors = pageColors;
+    try {
+      // No keepCanvasWrapper: the canvas has to go or the old colors stay.
+      pageView.reset();
+    } catch {
+      // A page that will not reset is redrawn by the next update anyway.
     }
   }
+  pdfViewer.update();
 }
 
 function setMode(mode, persist = true) {
@@ -956,8 +970,8 @@ function cycleMode(clear) {
     setMode(null);
     return;
   }
-  const index = PAGE_MODES.indexOf(state.mode);
-  setMode(PAGE_MODES[(index + 1) % PAGE_MODES.length]);
+  const index = MODE_CYCLE.indexOf(state.mode ?? null);
+  setMode(MODE_CYCLE[(index + 1) % MODE_CYCLE.length]);
 }
 
 // ── Find ──────────────────────────────────────────────────────────────────
