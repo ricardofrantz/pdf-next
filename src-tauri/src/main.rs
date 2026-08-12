@@ -119,12 +119,17 @@ fn is_complete(path: &Path) -> bool {
 }
 
 /// Point the watcher at a file and describe it for the frontend.
-fn adopt(watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
+///
+/// This is also where the webview earns the right to read that one file: the
+/// configured asset scope is empty, so nothing else on disk is reachable even
+/// if a document manages to run script at the app origin.
+fn adopt(app: &AppHandle, watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()));
     }
     let canonical = std::fs::canonicalize(&path).unwrap_or(path);
     let (modified, len) = stat(&canonical).unwrap_or((None, 0));
+    let _ = app.asset_protocol_scope().allow_file(&canonical);
 
     let mut state = watched.0.lock().map_err(|error| error.to_string())?;
     state.path = Some(canonical.clone());
@@ -137,8 +142,12 @@ fn adopt(watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
 }
 
 #[tauri::command]
-fn open_path(path: String, watched: State<'_, Watched>) -> Result<FileInfo, String> {
-    adopt(&watched, PathBuf::from(path))
+fn open_path(
+    app: AppHandle,
+    path: String,
+    watched: State<'_, Watched>,
+) -> Result<FileInfo, String> {
+    adopt(&app, &watched, PathBuf::from(path))
 }
 
 /// The file this window was launched with, if any.
@@ -348,8 +357,30 @@ fn first_path_argument() -> Option<PathBuf> {
         .find(|candidate| candidate.exists())
 }
 
+/// The webview must never leave the app's own origin.
+///
+/// A malicious PDF can carry a link annotation pointing anywhere. Without this,
+/// clicking it replaces the whole viewer with an attacker-controlled page — in a
+/// window with no address bar — and a link to the asset protocol would even be
+/// served back as HTML at a *local* origin, which Tauri trusts with IPC. This is
+/// top-level navigation only: subresources, fetches and PDF.js range requests
+/// are unaffected.
+fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("nav-guard")
+        .on_navigation(|_webview, url| {
+            let host = url.host_str();
+            match url.scheme() {
+                "tauri" => host == Some("localhost"),
+                "http" | "https" => host == Some("tauri.localhost"),
+                _ => false,
+            }
+        })
+        .build()
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(navigation_guard())
         .plugin(tauri_plugin_dialog::init())
         .manage(Watched::default())
         .invoke_handler(tauri::generate_handler![
@@ -364,7 +395,7 @@ fn main() {
         ])
         .setup(|app| {
             if let Some(path) = first_path_argument() {
-                let _ = adopt(&app.state::<Watched>(), path);
+                let _ = adopt(app.handle(), &app.state::<Watched>(), path);
             }
             if let Some(window) = app.get_webview_window("main") {
                 let handle = app.handle().clone();

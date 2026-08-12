@@ -1,6 +1,6 @@
 [package]
 name = "pdf-next"
-version = "0.2.1"
+version = "0.3.0"
 description = "Tiny, fast PDF and PNG viewer that reloads when the file changes"
 authors = ["Ricardo Frantz"]
 license = "MIT"

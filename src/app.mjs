@@ -6,7 +6,7 @@ import * as pdfjsLib from './vendor/pdfjs/build/pdf.min.mjs';
 // globalThis.pdfjsWorker: PDF.js reads that as "parse on the UI thread".
 globalThis.pdfjsLib = pdfjsLib;
 
-const { getDocument, GlobalWorkerOptions } = pdfjsLib;
+const { getDocument, GlobalWorkerOptions, PDFWorker } = pdfjsLib;
 const { EventBus, PDFFindController, PDFLinkService, PDFViewer } = await import(
   './vendor/pdfjs/web/pdf_viewer.mjs'
 );
@@ -19,6 +19,10 @@ GlobalWorkerOptions.workerSrc = './vendor/pdfjs/build/pdf.worker.min.mjs';
 // A rendered page canvas is the dominant cost in this app: one A4 page at 200%
 // on a 2x display is ~30 MB of RGBA. Capping it keeps huge pages from turning
 // into hundreds of megabytes of resident memory.
+// A rendered page canvas is the dominant per-document cost: one A4 page at 200%
+// on a 2x display is ~30 MB of RGBA. Raising this to 2^23 (which would keep a
+// docked fit-width page on PDF.js's single-canvas path) measured worse here, so
+// it stays where it is until someone measures the docked case properly.
 const MAX_CANVAS_PIXELS = 4_194_304;
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6];
 const PAGE_MODES = ['night', 'sepia', 'invert'];
@@ -58,17 +62,45 @@ const ui = {
 const state = {
   file: null,
   document: null,
-  loading: null,
+  task: null,
   mode: null,
   natural: null,
   docked: false,
   statusTimer: 0,
+  pendingRevision: null,
+  generation: 0,
 };
+
+// One worker for the life of the process. getDocument would otherwise spawn a
+// fresh one per load — a whole thread plus a 1.2 MB module compile on every
+// rebuild — and passing it explicitly means loadingTask.destroy() tears down the
+// document without terminating the worker, keeping fonts and cmaps warm.
+const pdfWorker = new PDFWorker();
 
 const eventBus = new EventBus();
 const linkService = new PDFLinkService({ eventBus });
+// A link annotation in an untrusted PDF must not be able to navigate anywhere.
+// Internal destinations (contents, cross-references) still work.
+linkService.externalLinkEnabled = false;
 const findController = new PDFFindController({ eventBus, linkService });
-const pdfViewer = new PDFViewer({
+
+// PDFViewer._resetView drops its page views without freeing their canvases, so
+// a reload leaves up to ten backing stores for the garbage collector to notice.
+// At one reload per second that is a large, avoidable sawtooth.
+class TidyViewer extends PDFViewer {
+  _resetView() {
+    for (const pageView of this._pages || []) {
+      try {
+        pageView.destroy();
+      } catch {
+        // A page already torn down is not an error.
+      }
+    }
+    super._resetView();
+  }
+}
+
+const pdfViewer = new TidyViewer({
   container: ui.container,
   viewer: ui.viewer,
   eventBus,
@@ -127,16 +159,31 @@ function sourceUrl(file) {
   return `${convertFileSrc(file.path)}?v=${file.revision}`;
 }
 
+/// Tear the previous document down completely before loading the next one.
+///
+/// This matters more than anything else in the app: the viewer reloads on every
+/// rebuild, and a PDF.js document that is merely dereferenced keeps its worker,
+/// font and image caches and rendered canvases alive. Measured at ~77 MB leaked
+/// per reload before this was awaited properly.
 async function releaseDocument() {
-  if (state.loading) {
-    try {
-      await state.loading.destroy();
-    } catch {
-      // A destroyed-mid-flight task is expected during rapid rebuilds.
-    }
-    state.loading = null;
-  }
+  const task = state.task;
+  state.task = null;
   state.document = null;
+  if (!task) {
+    return;
+  }
+  try {
+    // Drop the page views first so their canvases go with the document.
+    pdfViewer.setDocument(null);
+    linkService.setDocument(null);
+  } catch {
+    // An empty viewer is not an error.
+  }
+  try {
+    await task.destroy();
+  } catch {
+    // A task destroyed mid-flight is expected during rapid rebuilds.
+  }
 }
 
 // Window sizes are remembered per file, so reopening the same paper gives you
@@ -224,33 +271,49 @@ async function sizeToDocument(path, contentWidth, contentHeight) {
   }
 }
 
-async function showPdf(file, view) {
+async function showPdf(file, view, generation) {
   await releaseDocument();
+  if (state.generation !== generation) {
+    return;
+  }
   const task = getDocument({
     url: sourceUrl(file),
-    // Stream the file instead of pulling the whole thing into memory first.
-    disableAutoFetch: true,
-    disableStream: false,
-    rangeChunkSize: 65536,
+    // Reuse the one worker; without this every reload starts a new thread.
+    worker: pdfWorker,
+    // The asset protocol answers full GETs only (no Accept-Ranges), so range
+    // options would be inert. One streamed read per load is what happens.
+    disableRange: true,
     cMapUrl: './vendor/pdfjs/cmaps/',
     cMapPacked: true,
     standardFontDataUrl: './vendor/pdfjs/standard_fonts/',
     wasmUrl: './vendor/pdfjs/wasm/',
     iccUrl: './vendor/pdfjs/iccs/',
   });
-  state.loading = task;
+  // Held for teardown: dropping this reference is what leaks the worker.
+  state.task = task;
 
   const pdfDocument = await task.promise;
-  state.loading = null;
+  // A rebuild landing mid-load supersedes this one; its task is already gone.
+  if (state.generation !== generation) {
+    return;
+  }
   state.document = pdfDocument;
 
   pdfViewer.setDocument(pdfDocument);
   linkService.setDocument(pdfDocument, null);
   applyPageColors();
 
-  await new Promise((resolve) => {
-    eventBus.on('pagesinit', resolve, { once: true });
-  });
+  // Never wait forever: if setDocument fails internally, pagesinit never fires
+  // and this closure would be retained for the life of the process.
+  await Promise.race([
+    new Promise((resolve) => {
+      eventBus.on('pagesinit', resolve, { once: true });
+    }),
+    new Promise((resolve) => window.setTimeout(resolve, 10_000)),
+  ]);
+  if (state.generation !== generation) {
+    return;
+  }
 
   if (view) {
     restoreView(view);
@@ -280,6 +343,8 @@ function showImage(file, fit) {
 }
 
 async function openFile(file, { preserveView = false } = {}) {
+  // Rebuilds can outpace loading; only the newest one may touch the UI.
+  const generation = ++state.generation;
   const view = preserveView ? captureView() : null;
   state.file = file;
   document.body.classList.add('has-file');
@@ -289,7 +354,7 @@ async function openFile(file, { preserveView = false } = {}) {
 
   try {
     if (file.kind === 'pdf') {
-      await showPdf(file, view);
+      await showPdf(file, view, generation);
     } else if (file.kind === 'image') {
       showImage(file, !preserveView);
     } else {
@@ -298,6 +363,10 @@ async function openFile(file, { preserveView = false } = {}) {
     }
     document.body.classList.remove('file-missing');
   } catch (error) {
+    // A load cancelled by a newer rebuild is expected, not a failure to report.
+    if (state.generation !== generation) {
+      return;
+    }
     setStatus(`Could not open ${file.name}: ${error?.message || error}`, {
       error: true,
       sticky: true,
@@ -684,8 +753,26 @@ listen('file-changed', async (event) => {
   }
   document.body.classList.remove('file-missing');
   ui.waiting.hidden = true;
+  // Rebuilding with the window minimised is the common case in a compile loop;
+  // re-parsing a document nobody is looking at is pure waste. Catch up on the
+  // newest revision when the window comes back.
+  if (document.visibilityState === 'hidden') {
+    state.pendingRevision = revision;
+    return;
+  }
   await openFile({ ...state.file, revision }, { preserveView: true });
   setStatus('Reloaded');
+});
+
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || state.pendingRevision === null) {
+    return;
+  }
+  const revision = state.pendingRevision;
+  state.pendingRevision = null;
+  if (state.file) {
+    await openFile({ ...state.file, revision }, { preserveView: true });
+  }
 });
 
 // ── Theme ─────────────────────────────────────────────────────────────────

@@ -60,6 +60,24 @@ passing a path:
 pdf-next paper.pdf
 ```
 
+## Security
+
+The threat model is the obvious one: you open a PDF someone sent you, and the attacker controls
+every byte of it.
+
+- **The window cannot navigate away from the app.** A link annotation in a malicious PDF used to
+  be able to replace the entire viewer with an attacker-controlled page — in a window with no
+  address bar — and a link pointing back at the asset protocol would be served as HTML at a
+  *local* origin, which Tauri trusts with IPC. A navigation guard now rejects anything that is
+  not the app's own origin, and external links in documents are inert (internal ones, like a
+  table of contents, still work).
+- **The webview can read exactly one file**: the one you opened. The asset scope starts empty and
+  the opened document is allowed at runtime, so even injected script has no filesystem reach.
+- **Two permissions total** — listen and unlisten for events. Everything else, including path
+  resolution and the file dialog, is driven from Rust where the frontend cannot reach it.
+- No `eval`, no WASM execution, no plugins, no framing, and PDF scripting is off, so a document
+  cannot execute anything on its own.
+
 ## Memory, measured not claimed
 
 Numbers from Windows 11, WebView2 151, whole process tree, the 15-page *Attention Is All You
@@ -80,6 +98,19 @@ care about.
 
 Linux (WebKitGTK) and macOS (WKWebView) use different engines with different, usually smaller,
 floors — those are not measured yet.
+
+**Reloading used to leak badly.** Each reload dropped the previous PDF.js document without
+destroying it, which kept its worker thread, font and image caches and rendered canvases alive:
+**77 MB per reload, unbounded**, so an afternoon of LaTeX would reach several gigabytes. Now the
+document is torn down, one worker is shared for the life of the process instead of one spawned
+per reload, page views free their canvases instead of waiting for the collector, and reloads are
+skipped entirely while the window is hidden.
+
+What remains scales with the document, not with the number of reloads: a 1.2 KB PDF reloaded 20
+times grows by **nothing at all**, while a 2.2 MB paper grows ~10 MB per reload and gives much of
+it back when idle. That points at the webview caching each cache-busted URL; serving the document
+from a purpose-built protocol with `Cache-Control: no-store` is the next step, and would let the
+asset protocol be dropped entirely.
 
 ## Building
 

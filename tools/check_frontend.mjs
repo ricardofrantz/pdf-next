@@ -23,12 +23,37 @@ assert.doesNotMatch(
   'Assigning globalThis.pdfjsWorker makes PDF.js parse on the UI thread.',
 );
 
-// Memory: stream the file, cap the canvas.
-assert.match(app, /disableAutoFetch: true/, 'Documents must stream, not load whole.');
+// Memory. These are the ones that compound: the app reloads the document on
+// every rebuild, potentially hundreds of times per session.
 assert.match(
   app,
   /const MAX_CANVAS_PIXELS = [\d_]+;[\s\S]*?maxCanvasPixels: MAX_CANVAS_PIXELS/,
   'The canvas budget must be capped; it dominates resident memory.',
+);
+assert.match(
+  app,
+  /const pdfWorker = new PDFWorker\(\);[\s\S]*?worker: pdfWorker,/,
+  'One shared worker: getDocument would otherwise spawn a thread per reload.',
+);
+assert.match(
+  app,
+  /async function releaseDocument\(\)[\s\S]*?await task\.destroy\(\)/,
+  'The previous document must be destroyed, not just dereferenced (~77 MB/reload).',
+);
+assert.match(
+  app,
+  /class TidyViewer extends PDFViewer \{[\s\S]*?pageView\.destroy\(\)/,
+  'Page views must free their canvases on reset; PDF.js only drops the references.',
+);
+assert.match(
+  app,
+  /document\.visibilityState === 'hidden'[\s\S]*?state\.pendingRevision = revision/,
+  'Reloads must be deferred while the window is hidden.',
+);
+assert.match(
+  await readFile('src/vendor/pdfjs/web/pdf_viewer.mjs', 'utf8'),
+  /const DEFAULT_CACHE_SIZE = 3;/,
+  'Vendored PDF.js keeps 10 rendered pages by default; pdf-next pins it to 3.',
 );
 
 // Page colors carry over from vscode-pdf Next, where they were tuned.
@@ -115,14 +140,45 @@ assert.match(
   'A bogus measurement must never be turned into a window size.',
 );
 
-// Security posture, inherited from the extension.
+// Security. An untrusted PDF is the threat model: the attacker controls the
+// file, and the app reloads it from disk every second.
 const csp = config.app?.security?.csp ?? '';
 assert.doesNotMatch(csp, /unsafe-eval/, 'CSP must not allow eval.');
 assert.match(csp, /worker-src 'self' blob:/, 'CSP must allow the PDF.js worker.');
+assert.match(csp, /object-src 'none'/, 'CSP must forbid plugins.');
+assert.match(csp, /base-uri 'none'/, 'CSP must forbid base-tag hijacking.');
 assert.equal(
   config.app?.security?.assetProtocol?.enable,
   true,
   'The asset protocol carries document bytes into the webview.',
+);
+assert.deepEqual(
+  config.app?.security?.assetProtocol?.scope?.allow,
+  [],
+  'The asset scope must start empty; only the opened file is allowed, at runtime.',
+);
+assert.match(
+  main,
+  /fn adopt\([\s\S]*?asset_protocol_scope\(\)\.allow_file\(&canonical\)/,
+  'Opening a file is what grants the webview permission to read exactly it.',
+);
+assert.match(
+  main,
+  /fn navigation_guard\(\)[\s\S]*?"tauri" => host == Some\("localhost"\)/,
+  'The webview must not be able to navigate away from the app origin.',
+);
+assert.match(
+  app,
+  /linkService\.externalLinkEnabled = false/,
+  'External links in an untrusted PDF must be inert.',
+);
+const capabilities = JSON.parse(
+  await readFile('src-tauri/capabilities/default.json', 'utf8'),
+);
+assert.deepEqual(
+  capabilities.permissions,
+  ['core:event:allow-listen', 'core:event:allow-unlisten'],
+  'The webview needs events and nothing else; every other permission is reachable by injected script.',
 );
 
 // The README must name the runtime it actually ships.
