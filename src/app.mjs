@@ -60,6 +60,8 @@ const state = {
   document: null,
   loading: null,
   mode: null,
+  natural: null,
+  docked: false,
   statusTimer: 0,
 };
 
@@ -194,21 +196,32 @@ async function fitWindow(width, height, recenter) {
   }
 }
 
-async function sizeToDocument(path, contentWidth, contentHeight) {
-  const saved = rememberedSize(path);
-  if (saved) {
-    await fitWindow(saved[0], saved[1], false);
-    return;
+/// The window size that wraps the document exactly, in logical pixels.
+function autoWindowSize() {
+  if (!state.natural) {
+    return null;
   }
   const scrollbar = Math.max(
     ui.container.offsetWidth - ui.container.clientWidth,
     0,
   );
-  await fitWindow(
-    contentWidth + scrollbar,
-    contentHeight + barHeight(),
-    true,
-  );
+  return [
+    state.natural.width + scrollbar,
+    state.natural.height + barHeight(),
+  ];
+}
+
+async function sizeToDocument(path, contentWidth, contentHeight) {
+  state.natural = { width: contentWidth, height: contentHeight };
+  const saved = rememberedSize(path);
+  if (saved) {
+    await fitWindow(saved[0], saved[1], false);
+    return;
+  }
+  const auto = autoWindowSize();
+  if (auto) {
+    await fitWindow(auto[0], auto[1], true);
+  }
 }
 
 async function showPdf(file, view) {
@@ -427,20 +440,51 @@ function runFind(type = '', again = false, backwards = false) {
   });
 }
 
-/// Resizing the window keeps the scroll offset in pixels, which lands on a
-/// different page once the layout reflows — so put the reader back where it was.
-async function dockLeft() {
+/// One button, two states. Docked is a tall half-screen column, where fitting
+/// the whole page just shrinks the text — so it fits the width. Undocked is the
+/// automatic fit: the window wrapped around the page again, at fit-page.
+///
+/// Resizing keeps the scroll offset in pixels, which lands on a different page
+/// once the layout reflows, so the reader goes back where it was either way.
+async function toggleDock() {
   const page = state.document ? pdfViewer.currentPageNumber : 0;
+  const docking = !state.docked;
+
   try {
-    await invoke('snap_left');
+    if (docking) {
+      await invoke('snap_left');
+    } else {
+      const auto = autoWindowSize();
+      if (!auto) {
+        return;
+      }
+      await fitWindow(auto[0], auto[1], true);
+    }
   } catch {
     return;
   }
-  if (page > 1) {
-    window.setTimeout(() => {
-      pdfViewer.currentPageNumber = page;
-    }, 160);
+
+  setDocked(docking);
+  if (!state.document) {
+    return;
   }
+  window.setTimeout(() => {
+    pdfViewer.currentScaleValue = docking ? 'page-width' : 'page-fit';
+    if (page > 1) {
+      pdfViewer.currentPageNumber = page;
+    }
+  }, 160);
+}
+
+function setDocked(docked) {
+  state.docked = docked;
+  ui.dock.classList.toggle('on', docked);
+  ui.dock.setAttribute('aria-pressed', String(docked));
+  const label = docked
+    ? 'Undock and fit the window to the page (Ctrl+Shift+Left)'
+    : 'Fill the left half of the screen (Ctrl+Shift+Left)';
+  ui.dock.title = label;
+  ui.dock.setAttribute('aria-label', label);
 }
 
 // ── Wiring ────────────────────────────────────────────────────────────────
@@ -484,7 +528,7 @@ ui.zoom.addEventListener('change', () => {
 ui.zoomIn.addEventListener('click', () => stepZoom(1));
 ui.zoomOut.addEventListener('click', () => stepZoom(-1));
 ui.mode.addEventListener('click', (event) => cycleMode(event.shiftKey || event.altKey));
-ui.dock.addEventListener('click', dockLeft);
+ui.dock.addEventListener('click', toggleDock);
 
 ui.poll.addEventListener('change', () => {
   const seconds = Number(ui.poll.value) || 0;
@@ -564,7 +608,7 @@ window.addEventListener('keydown', (event) => {
   }
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 'arrowleft') {
     event.preventDefault();
-    dockLeft();
+    toggleDock();
     return;
   }
   if ((event.ctrlKey || event.metaKey) && key === 'f') {

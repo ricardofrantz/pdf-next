@@ -32,7 +32,10 @@ that survives a build deleting and recreating the file mid-compile.
   gives you that window back. Stored with the app's preferences, capped at the 80 most recent
   files, so there is no cache to manage.
 - **Dock to the left half** with `Ctrl+Shift+←` or the toolbar button, so the PDF takes the left
-  half of the screen and your editor keeps the right. Your page and zoom survive the move.
+  half of the screen and your editor keeps the right. It switches to fit-width, because fitting
+  a whole page into a tall narrow column just shrinks the text. Press it again to undock: the
+  window returns to the size of the page and the zoom returns to fit-page. Your place in the
+  document survives both moves.
 - **PDF and images.** `.pdf`, plus `.png`, `.jpg`, `.webp` and `.avif`.
 - **Follows your system dark mode**, and can recolour PDF pages themselves: night, sepia, or a
   full invert for scans. Shift+click the mode button to go back to plain pages.

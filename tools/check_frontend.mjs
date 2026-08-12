@@ -100,6 +100,16 @@ assert.match(
   'Images must refit only on a fresh open, not on reload.',
 );
 assert.match(
+  app,
+  /async function toggleDock\(\)[\s\S]*?docking \? 'page-width' : 'page-fit'/,
+  'Docking must switch to fit-width and undocking back to fit-page.',
+);
+assert.match(
+  app,
+  /async function toggleDock\(\)[\s\S]*?const auto = autoWindowSize\(\);[\s\S]*?await fitWindow\(auto\[0\], auto\[1\], true\)/,
+  'Undocking must restore the automatic fit to the document.',
+);
+assert.match(
   main,
   /fn fit_window\([\s\S]*?width\.is_finite\(\) && height\.is_finite\(\) && width > 80\.0 && height > 80\.0/,
   'A bogus measurement must never be turned into a window size.',
