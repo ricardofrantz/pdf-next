@@ -449,7 +449,7 @@ function applyPageColors() {
   }
 }
 
-function setMode(mode) {
+function setMode(mode, persist = true) {
   state.mode = mode;
   for (const candidate of PAGE_MODES) {
     document.body.classList.toggle(`mode-${candidate}`, candidate === mode);
@@ -461,6 +461,10 @@ function setMode(mode) {
     ? `Page mode: ${mode} (Shift+click to clear)`
     : 'Page mode: off';
   applyPageColors();
+  if (!persist) {
+    // A command-line flag styles this window; it is not a new preference.
+    return;
+  }
   try {
     localStorage.setItem('pdf-next.mode', mode || '');
   } catch {
@@ -805,8 +809,23 @@ try {
   ui.poll.value = '1';
 }
 
+// Command-line flags style this launch without changing saved preferences.
+const launch = await invoke('launch_options').catch(() => ({}));
+if (launch?.poll !== null && launch?.poll !== undefined) {
+  ui.poll.value = String(launch.poll);
+}
+if (launch?.mode) {
+  const requested = launch.mode === 'clear' ? null : launch.mode;
+  if (requested === null || PAGE_MODES.includes(requested)) {
+    setMode(requested, false);
+  }
+}
+
 const initial = await invoke('initial_file');
 if (initial) {
   await openFile(initial);
+  if (launch?.dock) {
+    await toggleDock();
+  }
 }
 ui.container.focus();

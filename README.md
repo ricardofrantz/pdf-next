@@ -60,6 +60,26 @@ passing a path:
 pdf-next paper.pdf
 ```
 
+### Command line
+
+```bash
+pdf-next paper.pdf --night --left     # dark pages, filling the left half
+pdf-next figure.png --invert          # inverted, for a white-background plot
+pdf-next thesis.pdf --sepia --poll 3  # warm paper, check for rebuilds every 3s
+```
+
+| Flag | Effect |
+| ---- | ------ |
+| `--left` | Dock to the left half of the screen (implies fit-width). |
+| `--night` / `--dark` | Dark pages, light text. |
+| `--sepia` / `--reader` | Warm paper. |
+| `--invert` | Invert the page, for scans and white-background figures. |
+| `--plain` / `--light` | Original page colors. |
+| `--mode <name>` | Same as the above, by name. |
+| `--poll <seconds>` | Watch interval; `0` turns watching off. |
+
+Appearance flags style that window only — they do not change your saved default.
+
 ## Security
 
 The threat model is the obvious one: you open a PDF someone sent you, and the attacker controls

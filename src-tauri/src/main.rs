@@ -350,11 +350,56 @@ fn spawn_watcher(app: AppHandle) {
     });
 }
 
-fn first_path_argument() -> Option<PathBuf> {
-    std::env::args_os()
-        .skip(1)
-        .map(PathBuf::from)
-        .find(|candidate| candidate.exists())
+/// How the window should come up, from the command line.
+#[derive(Clone, Default, Serialize)]
+struct Launch {
+    mode: Option<String>,
+    dock: bool,
+    poll: Option<u64>,
+}
+
+/// `pdf-next paper.pdf --night --left --poll 2`
+///
+/// Flags are deliberately few: appearance, docking, and the watch interval —
+/// the three things you would otherwise have to click after every launch.
+fn parse_arguments() -> (Option<PathBuf>, Launch) {
+    let mut launch = Launch::default();
+    let mut path = None;
+    let mut args = std::env::args_os().skip(1).peekable();
+
+    while let Some(argument) = args.next() {
+        let text = argument.to_string_lossy().to_string();
+        match text.as_str() {
+            "--left" | "--dock" | "--dock-left" => launch.dock = true,
+            "--night" | "--dark" => launch.mode = Some("night".into()),
+            "--sepia" | "--reader" => launch.mode = Some("sepia".into()),
+            "--invert" => launch.mode = Some("invert".into()),
+            "--plain" | "--light" => launch.mode = Some("clear".into()),
+            "--mode" => {
+                if let Some(value) = args.next() {
+                    launch.mode = Some(value.to_string_lossy().to_string());
+                }
+            }
+            "--poll" => {
+                if let Some(value) = args.next() {
+                    launch.poll = value.to_string_lossy().parse().ok();
+                }
+            }
+            _ => {
+                let candidate = PathBuf::from(&argument);
+                if path.is_none() && candidate.exists() {
+                    path = Some(candidate);
+                }
+            }
+        }
+    }
+
+    (path, launch)
+}
+
+#[tauri::command]
+fn launch_options(launch: State<'_, Launch>) -> Launch {
+    launch.inner().clone()
 }
 
 /// The webview must never leave the app's own origin.
@@ -391,10 +436,16 @@ fn main() {
             fit_window,
             window_size,
             set_poll_seconds,
+            launch_options,
             snap_left
         ])
         .setup(|app| {
-            if let Some(path) = first_path_argument() {
+            let (path, launch) = parse_arguments();
+            if let Some(seconds) = launch.poll {
+                POLL_SECONDS.store(seconds.min(60), Ordering::Relaxed);
+            }
+            app.manage(launch);
+            if let Some(path) = path {
                 let _ = adopt(app.handle(), &app.state::<Watched>(), path);
             }
             if let Some(window) = app.get_webview_window("main") {

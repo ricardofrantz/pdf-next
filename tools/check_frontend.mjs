@@ -172,6 +172,11 @@ assert.match(
   /linkService\.externalLinkEnabled = false/,
   'External links in an untrusted PDF must be inert.',
 );
+assert.match(
+  app,
+  /if \(launch\?\.mode\)[\s\S]*?setMode\(requested, false\)/,
+  'A command-line appearance flag must not overwrite the saved preference.',
+);
 const capabilities = JSON.parse(
   await readFile('src-tauri/capabilities/default.json', 'utf8'),
 );
