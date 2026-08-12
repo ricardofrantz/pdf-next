@@ -213,12 +213,21 @@ fn frame_extents(window: &tauri::Window) -> (f64, f64) {
 /// Resize to an exact inner size in logical pixels, clamped to the monitor's
 /// usable area. The frontend measures the rendered page, so the window ends up
 /// wrapped tightly around the document instead of guessing from an aspect ratio.
+///
+/// `exact` picks how a clamp is spent. On a fresh open the document is about to
+/// be scaled to fit, so shrinking one axis has to shrink the other or the page
+/// sits in a letterbox — that is the aspect-preserving path. When the frontend
+/// is wrapping the window around content it has already laid out, the content
+/// does not rescale; it scrolls. Preserving the aspect there would leave a band
+/// of empty desk down the side of a page taller than the screen, so each axis
+/// is clamped on its own.
 #[tauri::command]
 fn fit_window(
     window: tauri::Window,
     width: f64,
     height: f64,
     recenter: bool,
+    exact: bool,
 ) -> Result<(), String> {
     if !(width.is_finite() && height.is_finite() && width > 80.0 && height > 80.0) {
         return Err("implausible window size".into());
@@ -238,18 +247,23 @@ fn fit_window(
     let aspect = width / height;
     let mut inner_width = width.min(available_width);
     let mut inner_height = height.min(available_height);
-    // Keep the document's proportions when the screen forces a clamp.
-    if inner_width < width {
-        inner_height = inner_height.min(inner_width / aspect);
-    }
-    if inner_height < height {
-        inner_width = inner_width.min(inner_height * aspect);
+    if !exact {
+        // Keep the document's proportions when the screen forces a clamp.
+        if inner_width < width {
+            inner_height = inner_height.min(inner_width / aspect);
+        }
+        if inner_height < height {
+            inner_width = inner_width.min(inner_height * aspect);
+        }
     }
 
+    // A floor low enough that zooming a figure down still gives you the window
+    // you asked for. Below roughly this the toolbar starts to clip, which is
+    // the reader's business, not something to silently override.
     window
         .set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            inner_width.max(320.0),
-            inner_height.max(240.0),
+            inner_width.max(240.0),
+            inner_height.max(160.0),
         )))
         .map_err(|error| error.to_string())?;
     if recenter {
@@ -397,12 +411,16 @@ struct Launch {
     mode: Option<String>,
     dock: bool,
     poll: Option<u64>,
+    /// Everything after the first file, for the frontend to open as tabs. The
+    /// first one is adopted here, because it is what the watcher follows.
+    rest: Vec<String>,
 }
 
-/// `pdf-next paper.pdf --night --left --poll 2`
+/// `pdf-next paper.pdf figure.png --night --left --poll 2`
 ///
 /// Flags are deliberately few: appearance, docking, and the watch interval —
 /// the three things you would otherwise have to click after every launch.
+/// Several files open as tabs, with the first one showing.
 fn parse_arguments() -> (Option<PathBuf>, Launch) {
     let mut launch = Launch::default();
     let mut path = None;
@@ -428,8 +446,13 @@ fn parse_arguments() -> (Option<PathBuf>, Launch) {
             }
             _ => {
                 let candidate = PathBuf::from(&argument);
-                if path.is_none() && candidate.exists() {
+                if !candidate.exists() {
+                    continue;
+                }
+                if path.is_none() {
                     path = Some(candidate);
+                } else {
+                    launch.rest.push(candidate.to_string_lossy().to_string());
                 }
             }
         }

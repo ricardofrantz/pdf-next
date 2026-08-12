@@ -40,7 +40,10 @@ const ui = {
   zoomIn: el('zoomIn'),
   zoomOut: el('zoomOut'),
   mode: el('mode'),
+  wrap: el('wrap'),
   dock: el('dock'),
+  tabs: el('tabs'),
+  stage: el('stage'),
   imagePrev: el('imagePrev'),
   imageNext: el('imageNext'),
   imageIndex: el('imageIndex'),
@@ -56,6 +59,7 @@ const ui = {
   container: el('viewerContainer'),
   viewer: el('viewer'),
   image: el('image'),
+  imageStage: el('imageStage'),
   status: el('status'),
 };
 
@@ -66,11 +70,18 @@ const state = {
   mode: null,
   natural: null,
   docked: false,
+  wrap: false,
+  imageScale: 'fit',
   statusTimer: 0,
   pendingRevision: null,
   generation: 0,
   siblings: [],
   siblingIndex: -1,
+  // Tabs hold paths, never documents: only the active file is ever loaded, so
+  // ten open tabs cost the same resident memory as one.
+  tabs: [],
+  active: -1,
+  views: new Map(),
 };
 
 // One worker for the life of the process. getDocument would otherwise spawn a
@@ -131,10 +142,19 @@ function setStatus(message, { error = false, sticky = false } = {}) {
 // ── View state, preserved across reloads ──────────────────────────────────
 
 function captureView() {
+  if (state.file?.kind === 'image') {
+    return {
+      kind: 'image',
+      scale: state.imageScale,
+      top: ui.imageStage.scrollTop,
+      left: ui.imageStage.scrollLeft,
+    };
+  }
   if (!state.document) {
     return null;
   }
   return {
+    kind: 'pdf',
     page: pdfViewer.currentPageNumber || 1,
     scale: pdfViewer.currentScaleValue || 'auto',
     top: ui.container.scrollTop,
@@ -143,7 +163,7 @@ function captureView() {
 }
 
 function restoreView(view) {
-  if (!view) {
+  if (!view || view.kind === 'image') {
     return;
   }
   pdfViewer.currentScaleValue = view.scale;
@@ -153,6 +173,15 @@ function restoreView(view) {
   // Scroll last: setting the page already moves the container.
   ui.container.scrollTop = view.top;
   ui.container.scrollLeft = view.left;
+}
+
+function restoreImageView(view) {
+  if (!view || view.kind !== 'image') {
+    return;
+  }
+  setImageScale(view.scale, { refit: false });
+  ui.imageStage.scrollTop = view.top;
+  ui.imageStage.scrollLeft = view.left;
 }
 
 // ── Loading ───────────────────────────────────────────────────────────────
@@ -225,27 +254,36 @@ function rememberSize(path, width, height) {
   }
 }
 
-const barHeight = () => {
-  const value = Number.parseFloat(
+/// Everything above the stage — the toolbar, plus the tab strip when it is
+/// showing. Measured rather than read from --bar-height: the strip appears and
+/// disappears, and a window fit that guessed this would be wrong by its height.
+function chromeHeight() {
+  const measured = window.innerHeight - ui.stage.clientHeight;
+  if (measured > 0 && measured < window.innerHeight) {
+    return measured;
+  }
+  const declared = Number.parseFloat(
     getComputedStyle(document.documentElement).getPropertyValue('--bar-height'),
   );
-  return Number.isFinite(value) ? value : 36;
-};
+  return Number.isFinite(declared) ? declared : 36;
+}
 
 /// Wrap the window tightly around the document. Only on a fresh open — doing it
 /// on every rebuild would make the window jump around while you work.
-async function fitWindow(width, height, recenter) {
+async function fitWindow(width, height, recenter, exact = false) {
   if (!Number.isFinite(width) || !Number.isFinite(height)) {
     return;
   }
   try {
-    await invoke('fit_window', { width, height, recenter });
+    await invoke('fit_window', { width, height, recenter, exact });
   } catch {
     // A window that will not resize is not worth failing the open over.
   }
 }
 
-/// The window size that wraps the document exactly, in logical pixels.
+/// The window size that wraps the document at 100%, in logical pixels. Used on
+/// a fresh open, where the page is about to be laid out and a scrollbar may
+/// appear; the exact fit in wrapWindowSize() measures what is already there.
 function autoWindowSize() {
   if (!state.natural) {
     return null;
@@ -256,7 +294,7 @@ function autoWindowSize() {
   );
   return [
     state.natural.width + scrollbar,
-    state.natural.height + barHeight(),
+    state.natural.height + chromeHeight(),
   ];
 }
 
@@ -270,6 +308,173 @@ async function sizeToDocument(path, contentWidth, contentHeight) {
   const auto = autoWindowSize();
   if (auto) {
     await fitWindow(auto[0], auto[1], true);
+  }
+}
+
+// ── Image zoom ────────────────────────────────────────────────────────────
+
+/// An image has no viewer of its own. 'fit' is the CSS default — max-width:100%,
+/// height follows — and a number is an explicit width in CSS pixels. Either way
+/// the browser scales the bitmap it already decoded, so zoom costs no memory.
+function setImageScale(value, { refit = true } = {}) {
+  state.imageScale = value;
+  document.body.classList.toggle('image-zoomed', value !== 'fit');
+  if (value === 'fit') {
+    ui.image.style.width = '';
+    ui.image.style.height = '';
+  } else if (ui.image.naturalWidth) {
+    ui.image.style.width = `${Math.round(ui.image.naturalWidth * value)}px`;
+    ui.image.style.height = 'auto';
+  }
+  updateZoomControl(value === 'fit' ? 'auto' : String(value), imageScale());
+  if (refit) {
+    scheduleWrap();
+  }
+}
+
+/// What the image is actually displayed at, whether CSS or a number set it.
+function imageScale() {
+  if (typeof state.imageScale === 'number') {
+    return state.imageScale;
+  }
+  const natural = ui.image.naturalWidth || 0;
+  return natural ? ui.image.offsetWidth / natural : 1;
+}
+
+/// The scale at which the whole image fits inside the stage, both axes.
+function imageContainScale() {
+  const { naturalWidth: width, naturalHeight: height } = ui.image;
+  if (!width || !height) {
+    return 1;
+  }
+  const style = getComputedStyle(ui.imageStage);
+  const padX = Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight);
+  const padY = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
+  return Math.min(
+    (ui.imageStage.clientWidth - padX) / width,
+    (ui.imageStage.clientHeight - padY) / height,
+  );
+}
+
+// ── Fitting the window to the content ─────────────────────────────────────
+
+/// The size of what is on screen right now, in logical pixels. Read off the
+/// rendered element rather than recomputed, so page rotation, mixed page sizes
+/// and the image's own aspect ratio all come along for free. Ceiled: a
+/// fractional size rounds down into a one-pixel overflow, which raises a
+/// scrollbar, which shrinks the viewport, which raises the other scrollbar.
+function contentSize() {
+  if (state.file?.kind === 'image') {
+    if (!ui.image.naturalWidth) {
+      return null;
+    }
+    return [Math.ceil(ui.image.offsetWidth), Math.ceil(ui.image.offsetHeight)];
+  }
+  if (!state.document) {
+    return null;
+  }
+  const index = Math.max(0, (pdfViewer.currentPageNumber || 1) - 1);
+  const div = pdfViewer.getPageView?.(index)?.div;
+  if (div?.offsetWidth) {
+    return [Math.ceil(div.offsetWidth), Math.ceil(div.offsetHeight)];
+  }
+  if (!state.natural) {
+    return null;
+  }
+  const scale = pdfViewer.currentScale || 1;
+  return [
+    Math.ceil(state.natural.width * scale),
+    Math.ceil(state.natural.height * scale),
+  ];
+}
+
+/// The window that wraps the content exactly. No scrollbar allowance — with an
+/// exact window there is nothing left to scroll — and no padding, because
+/// body.wrap-on has already taken the stage's padding to zero.
+function wrapWindowSize() {
+  const content = contentSize();
+  return content ? [content[0], content[1] + chromeHeight()] : null;
+}
+
+let wrapTimer = 0;
+let wrapping = false;
+
+/// Coalesce the refits: holding + would otherwise fire a set_size per step.
+function scheduleWrap() {
+  if (!state.wrap) {
+    return;
+  }
+  window.clearTimeout(wrapTimer);
+  wrapTimer = window.setTimeout(applyWrap, 80);
+}
+
+async function applyWrap() {
+  const size = wrapWindowSize();
+  if (!size) {
+    return;
+  }
+  wrapping = true;
+  try {
+    await fitWindow(size[0], size[1], false, true);
+  } finally {
+    // Let the resize land before the resize listener is allowed to treat it as
+    // a size the reader chose and remember it.
+    window.setTimeout(() => {
+      wrapping = false;
+    }, 700);
+  }
+}
+
+/// One button: while it is on, the window follows the content. Zoom out and the
+/// window comes in with it; zoom in and it grows, up to the screen.
+///
+/// The scale has to be a number for that to terminate. A preset — page-fit,
+/// page-width, auto — is the opposite instruction: it fits the *content to the
+/// window*, so resizing the window would rescale the page, which would resize
+/// the window again. Turning wrap on pins the live scale to a number, and
+/// choosing a preset later turns wrap off.
+function setWrap(on) {
+  state.wrap = on;
+  document.body.classList.toggle('wrap-on', on);
+  ui.wrap.classList.toggle('on', on);
+  ui.wrap.setAttribute('aria-pressed', String(on));
+  const label = on
+    ? 'Window follows the content — click to stop (Ctrl+Shift+F)'
+    : 'Fit the window to the content (Ctrl+Shift+F)';
+  ui.wrap.title = label;
+  ui.wrap.setAttribute('aria-label', label);
+}
+
+async function toggleWrap() {
+  if (state.wrap) {
+    setWrap(false);
+    return;
+  }
+  pinScale();
+  setWrap(true);
+  if (state.docked) {
+    // The dock sets an explicit half-screen size; wrap is about to override it,
+    // so the pip should stop claiming the window is docked.
+    setDocked(false);
+  }
+  await applyWrap();
+}
+
+/// Freeze whatever scale is showing, so a window resize cannot change it.
+function pinScale() {
+  if (state.file?.kind === 'image') {
+    if (state.imageScale === 'fit') {
+      setImageScale(imageScale(), { refit: false });
+    }
+    return;
+  }
+  if (state.document) {
+    const scale = pdfViewer.currentScale;
+    pdfViewer.currentScaleValue = String(scale);
+    // Pinning a preset to the number it already resolves to is not a scale
+    // change, so PDF.js says nothing and the control would keep reading
+    // "Fit page" while it is no longer fitting anything.
+    updateZoomControl(String(scale), scale);
   }
 }
 
@@ -374,29 +579,48 @@ async function stepSibling(delta) {
   }
   try {
     const file = await invoke('open_path', { path });
+    // Walking a folder replaces what the tab is showing rather than opening a
+    // tab per file — browsing 200 PNGs must not leave 200 tabs behind.
+    const tab = state.tabs[state.active];
+    if (tab) {
+      state.views.delete(tab.path);
+      tab.path = file.path;
+      tab.name = file.name;
+      tab.kind = file.kind;
+      renderTabs();
+    }
     await openFile(file, { keepWindow: true });
   } catch (error) {
     setStatus(String(error), { error: true });
   }
 }
 
-function showImage(file, fit) {
+function showImage(file, fit, view) {
   ui.image.src = sourceUrl(file);
   ui.image.alt = file.name;
-  if (!fit) {
-    return;
-  }
   ui.image.decode?.().then(
-    () =>
-      sizeToDocument(file.path, ui.image.naturalWidth, ui.image.naturalHeight),
+    () => {
+      if (view) {
+        restoreImageView(view);
+      } else {
+        setImageScale('fit', { refit: false });
+      }
+      if (fit) {
+        sizeToDocument(file.path, ui.image.naturalWidth, ui.image.naturalHeight);
+      }
+      scheduleWrap();
+    },
     () => {},
   );
 }
 
-async function openFile(file, { preserveView = false, keepWindow = false } = {}) {
+async function openFile(
+  file,
+  { preserveView = false, keepWindow = false, view: given = null } = {},
+) {
   // Rebuilds can outpace loading; only the newest one may touch the UI.
   const generation = ++state.generation;
-  const view = preserveView ? captureView() : null;
+  const view = given || (preserveView ? captureView() : null);
   state.file = file;
   document.body.classList.add('has-file');
   document.body.classList.toggle('kind-pdf', file.kind === 'pdf');
@@ -407,7 +631,7 @@ async function openFile(file, { preserveView = false, keepWindow = false } = {})
     if (file.kind === 'pdf') {
       await showPdf(file, view, generation);
     } else if (file.kind === 'image') {
-      showImage(file, !preserveView && !keepWindow);
+      showImage(file, !view && !keepWindow, view);
       void loadSiblings(file);
     } else {
       setStatus(`Unsupported file type: ${file.name}`, { error: true, sticky: true });
@@ -429,10 +653,187 @@ async function openFile(file, { preserveView = false, keepWindow = false } = {})
 async function openPath(path) {
   try {
     const file = await invoke('open_path', { path });
-    await openFile(file);
+    await openInTab(file);
   } catch (error) {
     setStatus(String(error), { error: true, sticky: true });
   }
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────
+//
+// A tab is a path and nothing else. Switching tears the current document down
+// through the same releaseDocument() path a rebuild uses and loads the next
+// one, so six open tabs cost what one costs. The price is a re-parse on switch,
+// paid against a worker whose fonts and cmaps are already warm.
+//
+// It also means a background tab is never stale: it is read from disk at the
+// moment you return to it, without anything having to watch it.
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const XLINK_NS = 'http://www.w3.org/1999/xlink';
+
+function icon(href) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('class', 'icon');
+  const use = document.createElementNS(SVG_NS, 'use');
+  use.setAttribute('href', href);
+  use.setAttributeNS(XLINK_NS, 'xlink:href', href);
+  svg.append(use);
+  return svg;
+}
+
+function renderTabs() {
+  document.body.classList.toggle('has-tabs', state.tabs.length > 1);
+  ui.tabs.textContent = '';
+  if (state.tabs.length < 2) {
+    return;
+  }
+  state.tabs.forEach((tab, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'tab';
+    button.setAttribute('role', 'tab');
+    button.title = tab.path;
+    button.setAttribute('aria-selected', String(index === state.active));
+
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = tab.name;
+    button.append(label);
+
+    const shut = document.createElement('span');
+    shut.className = 'shut';
+    shut.setAttribute('aria-label', `Close ${tab.name}`);
+    shut.append(icon('#i-close'));
+    button.append(shut);
+
+    button.addEventListener('click', (event) => {
+      if (event.target instanceof Element && event.target.closest('.shut')) {
+        void closeTab(index);
+        return;
+      }
+      void activateTab(index);
+    });
+    button.addEventListener('auxclick', (event) => {
+      if (event.button === 1) {
+        event.preventDefault();
+        void closeTab(index);
+      }
+    });
+    ui.tabs.append(button);
+    if (index === state.active) {
+      button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  });
+}
+
+/// Focus the file if it is already open; otherwise add it next to the current
+/// tab, where a file opened from the one you are reading belongs.
+async function openInTab(file) {
+  const existing = state.tabs.findIndex((tab) => tab.path === file.path);
+  if (existing >= 0) {
+    await activateTab(existing, { force: true });
+    return;
+  }
+  stashView();
+  const entry = { path: file.path, name: file.name, kind: file.kind };
+  const at = state.active < 0 ? state.tabs.length : state.active + 1;
+  state.tabs.splice(at, 0, entry);
+  state.active = at;
+  renderTabs();
+  await openFile(file);
+}
+
+/// Park the outgoing file's page, zoom and scroll so the tab comes back to the
+/// place you left it rather than to the top of the document.
+function stashView() {
+  const current = state.tabs[state.active];
+  if (!current) {
+    return;
+  }
+  const view = captureView();
+  if (view) {
+    state.views.set(current.path, view);
+  }
+}
+
+async function activateTab(index, { force = false } = {}) {
+  const tab = state.tabs[index];
+  if (!tab || (index === state.active && !force)) {
+    return;
+  }
+  stashView();
+  state.active = index;
+  renderTabs();
+  try {
+    const file = await invoke('open_path', { path: tab.path });
+    // Keep the name fresh in case the file moved out from under the tab.
+    tab.name = file.name;
+    tab.kind = file.kind;
+    await openFile(file, {
+      keepWindow: true,
+      view: state.views.get(tab.path) || null,
+    });
+  } catch (error) {
+    setStatus(String(error), { error: true, sticky: true });
+  }
+}
+
+async function closeTab(index) {
+  const tab = state.tabs[index];
+  if (!tab) {
+    return;
+  }
+  state.views.delete(tab.path);
+  state.tabs.splice(index, 1);
+  if (!state.tabs.length) {
+    await closeAll();
+    return;
+  }
+  if (index < state.active) {
+    state.active -= 1;
+    renderTabs();
+    return;
+  }
+  if (index > state.active) {
+    renderTabs();
+    return;
+  }
+  // The closed tab was the one showing: take its right-hand neighbour, or the
+  // last tab if it was the rightmost.
+  state.active = Math.min(index, state.tabs.length - 1);
+  renderTabs();
+  await activateTab(state.active, { force: true });
+}
+
+/// Back to the small empty window you get on a cold start.
+async function closeAll() {
+  state.tabs = [];
+  state.active = -1;
+  state.views.clear();
+  state.file = null;
+  state.natural = null;
+  state.siblings = [];
+  state.siblingIndex = -1;
+  state.pendingRevision = null;
+  await releaseDocument();
+  ui.image.removeAttribute('src');
+  setImageScale('fit', { refit: false });
+  document.body.classList.remove('has-file', 'kind-pdf', 'kind-image', 'file-missing');
+  document.title = 'pdf-next';
+  ui.waiting.hidden = true;
+  updateSiblingControls();
+  renderTabs();
+  closeFind();
+  setStatus('');
+}
+
+function cycleTab(delta) {
+  if (state.tabs.length < 2) {
+    return;
+  }
+  const count = state.tabs.length;
+  void activateTab((state.active + delta + count) % count);
 }
 
 // ── Page and zoom controls ────────────────────────────────────────────────
@@ -472,16 +873,42 @@ function removeCustomZoom() {
 }
 
 function stepZoom(direction) {
-  if (!state.document) {
+  const image = state.file?.kind === 'image';
+  if (!image && !state.document) {
     return;
   }
-  const current = pdfViewer.currentScale;
+  const current = image ? imageScale() : pdfViewer.currentScale;
   const next =
     direction > 0
       ? ZOOM_STEPS.find((step) => step > current + 0.001)
       : [...ZOOM_STEPS].reverse().find((step) => step < current - 0.001);
-  if (next) {
+  if (!next) {
+    return;
+  }
+  if (image) {
+    setImageScale(next);
+  } else {
     pdfViewer.currentScaleValue = String(next);
+  }
+}
+
+/// The preset ladder means something slightly different for a bare image: there
+/// is no page, so "fit page" is the scale that contains it and the other two
+/// fits are the CSS default, which fills the width and lets the height run.
+function applyZoomChoice(value) {
+  if (state.file?.kind !== 'image') {
+    pdfViewer.currentScaleValue = value;
+    return;
+  }
+  if (value === 'page-fit') {
+    setImageScale(imageContainScale());
+  } else if (value === 'auto' || value === 'page-width') {
+    setImageScale('fit');
+  } else {
+    const scale = Number(value);
+    if (Number.isFinite(scale) && scale > 0) {
+      setImageScale(scale);
+    }
   }
 }
 
@@ -574,6 +1001,12 @@ function runFind(type = '', again = false, backwards = false) {
 async function toggleDock() {
   const page = state.document ? pdfViewer.currentPageNumber : 0;
   const docking = !state.docked;
+  // Docking sets an explicit half-screen size, which wrap would immediately
+  // undo. Only one of them can own the window.
+  if (state.wrap) {
+    window.clearTimeout(wrapTimer);
+    setWrap(false);
+  }
 
   try {
     if (docking) {
@@ -644,15 +1077,22 @@ ui.page.addEventListener('change', () => {
 });
 
 ui.zoom.addEventListener('change', () => {
-  if (ui.zoom.value === 'custom') {
+  const value = ui.zoom.value;
+  if (value === 'custom') {
     return;
   }
-  pdfViewer.currentScaleValue = ui.zoom.value;
+  // A fit preset is the opposite instruction to wrap — it sizes the content to
+  // the window — so asking for one turns wrap off rather than fighting it.
+  if (state.wrap && (value === 'auto' || value === 'page-fit' || value === 'page-width')) {
+    setWrap(false);
+  }
+  applyZoomChoice(value);
 });
 
 ui.zoomIn.addEventListener('click', () => stepZoom(1));
 ui.zoomOut.addEventListener('click', () => stepZoom(-1));
 ui.mode.addEventListener('click', (event) => cycleMode(event.shiftKey || event.altKey));
+ui.wrap.addEventListener('click', toggleWrap);
 ui.dock.addEventListener('click', toggleDock);
 ui.imagePrev.addEventListener('click', () => stepSibling(-1));
 ui.imageNext.addEventListener('click', () => stepSibling(1));
@@ -668,9 +1108,10 @@ ui.poll.addEventListener('change', () => {
 });
 
 // Remember the window size per file, so reopening restores the shape you left.
+// A size the app chose for itself while wrapping is not a size the reader chose.
 let sizeTimer = 0;
 window.addEventListener('resize', () => {
-  if (!state.file) {
+  if (!state.file || wrapping) {
     return;
   }
   window.clearTimeout(sizeTimer);
@@ -706,6 +1147,7 @@ eventBus.on('scalechanging', (event) => {
   // though it is still tracking "fit page" — so fall back to the live value.
   const value = event.presetValue || pdfViewer.currentScaleValue || event.scale;
   updateZoomControl(String(value), event.scale);
+  scheduleWrap();
 });
 eventBus.on('updatefindmatchescount', ({ matchesCount }) => {
   ui.findCount.textContent = matchesCount?.total
@@ -738,6 +1180,26 @@ window.addEventListener('keydown', (event) => {
     toggleDock();
     return;
   }
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 'f') {
+    event.preventDefault();
+    void toggleWrap();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && key === 'w') {
+    event.preventDefault();
+    void closeTab(state.active);
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && key === 'tab') {
+    event.preventDefault();
+    cycleTab(event.shiftKey ? -1 : 1);
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && key >= '1' && key <= '9') {
+    event.preventDefault();
+    void activateTab(Number(key) - 1);
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && key === 'f') {
     event.preventDefault();
     openFind();
@@ -755,6 +1217,26 @@ window.addEventListener('keydown', (event) => {
   }
   if (key === 'escape' && !ui.find.hidden) {
     closeFind();
+    return;
+  }
+  // Zoom is the one thing that means the same in both modes.
+  if (key === '+' || key === '=') {
+    event.preventDefault();
+    stepZoom(1);
+    return;
+  }
+  if (key === '-') {
+    event.preventDefault();
+    stepZoom(-1);
+    return;
+  }
+  // Left and Right step through the tabs whenever there are tabs to step
+  // through. With a single file open there is nothing to switch to, so they go
+  // back to walking the folder — which is what they are for in a folder of
+  // figures opened one at a time.
+  if (state.tabs.length > 1 && (key === 'arrowright' || key === 'arrowleft')) {
+    event.preventDefault();
+    cycleTab(key === 'arrowright' ? 1 : -1);
     return;
   }
   // Arrows walk the folder in image mode; in a PDF they scroll the page, which
@@ -788,24 +1270,21 @@ window.addEventListener('keydown', (event) => {
     case 'g':
       pdfViewer.currentPageNumber = event.shiftKey ? pdfViewer.pagesCount : 1;
       break;
-    case '+':
-    case '=':
-      stepZoom(1);
-      break;
-    case '-':
-      stepZoom(-1);
-      break;
     default:
       return;
   }
   event.preventDefault();
 });
 
-// Drag and drop, straight from the OS.
+// Drag and drop, straight from the OS. Several files at once open as tabs, and
+// the first one is the one you end up looking at.
 listen('tauri://drag-drop', async (event) => {
-  const [path] = event.payload?.paths || [];
-  if (path) {
+  const paths = event.payload?.paths || [];
+  for (const path of paths) {
     await openPath(path);
+  }
+  if (paths.length > 1) {
+    await activateTab(state.tabs.findIndex((tab) => tab.path === paths[0]));
   }
 });
 
@@ -889,7 +1368,14 @@ if (launch?.mode) {
 
 const initial = await invoke('initial_file');
 if (initial) {
-  await openFile(initial);
+  await openInTab(initial);
+  // Extra paths on the command line become tabs; the first one stays showing.
+  for (const path of launch?.rest || []) {
+    await openPath(path);
+  }
+  if (state.tabs.length > 1) {
+    await activateTab(0);
+  }
   if (launch?.dock) {
     await toggleDock();
   }

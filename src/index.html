@@ -46,6 +46,10 @@
       <symbol id="i-close" viewBox="0 0 16 16" fill="none">
         <path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
       </symbol>
+      <symbol id="i-wrap" viewBox="0 0 16 16" fill="none">
+        <path d="M2 5.5V3.5C2 2.95 2.45 2.5 3 2.5H5M11 2.5H13C13.55 2.5 14 2.95 14 3.5V5.5M14 10.5V12.5C14 13.05 13.55 13.5 13 13.5H11M5 13.5H3C2.45 13.5 2 13.05 2 12.5V10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <rect x="5.6" y="5.6" width="4.8" height="4.8" rx="0.6" fill="currentColor"/>
+      </symbol>
     </svg>
 
     <header id="bar">
@@ -104,6 +108,9 @@
         <button id="mode" type="button" title="Page mode (Shift+click to clear)" aria-label="Page mode" aria-pressed="false">
           <svg class="icon"><use href="#i-mode"/></svg>
         </button>
+        <button id="wrap" type="button" title="Fit the window to the content (Ctrl+Shift+F)" aria-label="Fit the window to the content" aria-pressed="false">
+          <svg class="icon"><use href="#i-wrap"/></svg>
+        </button>
         <button id="dock" type="button" title="Fill the left half of the screen (Ctrl+Shift+Left)" aria-label="Fill the left half of the screen" aria-pressed="false">
           <svg class="icon"><use href="#i-dock-left"/></svg>
         </button>
@@ -118,6 +125,8 @@
         </span>
       </div>
     </header>
+
+    <div id="tabs" role="tablist" aria-label="Open files"></div>
 
     <main id="stage">
       <div id="viewerContainer" tabindex="0">

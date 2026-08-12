@@ -121,8 +121,8 @@ assert.match(
 );
 assert.match(
   app,
-  /showImage\(file, !preserveView && !keepWindow\)/,
-  'Images must refit only on a fresh open — not on reload, and not when stepping through a folder.',
+  /showImage\(file, !view && !keepWindow, view\)/,
+  'Images must refit only on a fresh open — not on reload, not on a tab switch, and not when stepping through a folder.',
 );
 assert.match(
   app,
@@ -143,6 +143,68 @@ assert.match(
   main,
   /fn fit_window\([\s\S]*?width\.is_finite\(\) && height\.is_finite\(\) && width > 80\.0 && height > 80\.0/,
   'A bogus measurement must never be turned into a window size.',
+);
+
+// Wrapping the window around the content. The failure mode here is not a wrong
+// size, it is an infinite one: the window resizes, a preset scale recomputes,
+// the scale change refits the window, forever.
+assert.match(
+  app,
+  /function pinScale\(\)[\s\S]*?const scale = pdfViewer\.currentScale;\s*pdfViewer\.currentScaleValue = String\(scale\)/,
+  'Turning wrap on must pin the scale to a number; a preset would resize forever.',
+);
+assert.match(
+  app,
+  /if \(state\.wrap && \(value === 'auto' \|\| value === 'page-fit' \|\| value === 'page-width'\)\) \{\s*setWrap\(false\)/,
+  'Choosing a fit preset must turn wrap off — the two are opposite instructions.',
+);
+assert.match(
+  app,
+  /async function toggleDock\(\)[\s\S]*?if \(state\.wrap\) \{[\s\S]*?setWrap\(false\)/,
+  'Docking sets an explicit size; wrap must let go of the window first.',
+);
+assert.match(
+  app,
+  /function chromeHeight\(\)\s*\{\s*const measured = window\.innerHeight - ui\.stage\.clientHeight/,
+  'Chrome height must be measured: the tab strip changes it, --bar-height does not.',
+);
+assert.match(
+  app,
+  /function contentSize\(\)[\s\S]*?Math\.ceil\(ui\.image\.offsetWidth\)/,
+  'The fit must measure the rendered element, ceiled — a fractional size raises a scrollbar.',
+);
+assert.match(
+  styles,
+  /body\.wrap-on #imageStage \{[^}]*padding: 0/s,
+  'An exact fit means no padding: the window frame is the edge of the picture.',
+);
+assert.match(
+  main,
+  /fn fit_window\([\s\S]*?exact: bool,[\s\S]*?if !exact \{[\s\S]*?inner_height\.min\(inner_width \/ aspect\)/,
+  'Aspect is preserved only on the open-time fit; a wrap clamps each axis alone.',
+);
+
+// Tabs hold paths. A tab that held a document would cost ~60 MB of resident
+// memory each, which is the opposite of the point of this app.
+assert.match(
+  app,
+  /tabs: \[\],\s*active: -1,\s*views: new Map\(\)/,
+  'Tab state is paths and view offsets; the document lives once, in state.document.',
+);
+assert.doesNotMatch(
+  app,
+  /tabs\[[^\]]*\]\.(document|task)\b|(document|task): (state\.document|state\.task)/,
+  'No tab may retain a PDF document or loading task.',
+);
+assert.match(
+  app,
+  /async function activateTab\([\s\S]*?await openFile\(file, \{\s*keepWindow: true,\s*view: state\.views\.get\(tab\.path\) \|\| null,/,
+  'Switching tabs reloads through openFile, restoring the view it was left at.',
+);
+assert.match(
+  app,
+  /async function stepSibling\(delta\)[\s\S]*?tab\.path = file\.path/,
+  'Walking a folder must replace what the tab shows, not open a tab per file.',
 );
 
 // Security. An untrusted PDF is the threat model: the attacker controls the

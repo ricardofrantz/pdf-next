@@ -89,6 +89,14 @@ body {
   margin: 0;
   overflow: hidden;
   background: var(--bg);
+}
+
+/* A column, so the stage takes whatever the chrome above it leaves. The tab
+   strip comes and goes, and the window fit measures the real content height —
+   neither can depend on a hard-coded toolbar height. */
+body {
+  display: flex;
+  flex-direction: column;
   color: var(--fg);
   font-family: var(--ui-font);
   font-size: 13px;
@@ -115,11 +123,21 @@ kbd {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex: 0 0 auto;
   height: var(--bar-height);
   padding: 5px 8px;
   border-bottom: 1px solid var(--rule);
   background: var(--chrome);
   white-space: nowrap;
+  /* Wrapping the window around a small figure can leave the window narrower
+     than the toolbar. Scroll it rather than putting controls out of reach. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+#bar::-webkit-scrollbar {
+  display: none;
 }
 
 .group {
@@ -254,13 +272,93 @@ body:not(.has-file) #poll {
   background: var(--error);
 }
 
+/* ── Tabs ────────────────────────────────────────────────────────────── */
+/* One file is the normal case, and it should look exactly as it did before
+   tabs existed — so the strip is not there at all until a second file opens. */
+#tabs {
+  display: none;
+}
+
+body.has-tabs #tabs {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  gap: 2px;
+  padding: 3px 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--rule);
+  background: var(--chrome);
+  scrollbar-width: none;
+}
+
+#tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 200px;
+  height: 24px;
+  padding: 0 4px 0 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  background: var(--hover);
+}
+
+.tab[aria-selected='true'] {
+  background: var(--active);
+  color: var(--fg);
+}
+
+.tab .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab .shut {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  opacity: 0;
+}
+
+.tab:hover .shut,
+.tab[aria-selected='true'] .shut {
+  opacity: 0.7;
+}
+
+.tab .shut:hover {
+  background: var(--hover);
+  opacity: 1;
+}
+
+.tab .shut .icon {
+  width: 12px;
+  height: 12px;
+}
+
 /* ── Stage ───────────────────────────────────────────────────────────── */
 #stage {
-  position: absolute;
-  top: var(--bar-height);
-  right: 0;
-  bottom: 0;
-  left: 0;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
   background: var(--desk);
 }
 
@@ -286,7 +384,9 @@ body:not(.kind-pdf) #viewerContainer {
   inset: 0;
   overflow: auto;
   display: grid;
-  place-items: center;
+  /* "safe" so a zoomed-in image scrolls from its top-left instead of having it
+     centred out of reach above the scroll origin. */
+  place-items: safe center;
   padding: 16px;
 }
 
@@ -297,6 +397,22 @@ body:not(.kind-pdf) #viewerContainer {
   box-shadow:
     0 0 0 1px color-mix(in srgb, var(--fg) var(--page-ring), transparent),
     0 2px 14px var(--shadow);
+}
+
+/* An explicit zoom sets the width in pixels, so the fit-to-window cap has to
+   come off or the image would never grow past the window. */
+body.image-zoomed #image {
+  max-width: none;
+}
+
+/* Wrapping the window around the content means exactly that: no padding, and
+   no ring — the window frame is the edge of the picture now. */
+body.wrap-on #imageStage {
+  padding: 0;
+}
+
+body.wrap-on #image {
+  box-shadow: none;
 }
 
 body.mode-invert #image {
