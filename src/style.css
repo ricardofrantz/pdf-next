@@ -441,8 +441,14 @@ body:not(.kind-image) #imageStage {
   display: none;
 }
 
-body:not(.kind-pdf) .pdf-only {
+body:not(.kind-pdf) .pdf-only,
+body:not(.kind-image) .image-only {
   display: none;
+}
+
+#imageIndex {
+  padding: 0 4px;
+  font-variant-numeric: tabular-nums;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -65,6 +65,16 @@
         <input id="page" type="number" min="1" value="1" aria-label="Page number" />
         <span id="pages" class="dim">/ —</span>
       </div>
+      <div class="group image-only">
+        <button id="imagePrev" type="button" title="Previous file in folder (Left)" aria-label="Previous file in folder">
+          <svg class="icon"><use href="#i-prev"/></svg>
+        </button>
+        <button id="imageNext" type="button" title="Next file in folder (Right)" aria-label="Next file in folder">
+          <svg class="icon"><use href="#i-next"/></svg>
+        </button>
+        <span id="imageIndex" class="dim"></span>
+      </div>
+      <div class="sep image-only"></div>
       <div class="sep pdf-only"></div>
       <div class="group">
         <button id="zoomOut" type="button" title="Zoom out (-)" aria-label="Zoom out">

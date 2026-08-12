@@ -16,9 +16,6 @@ const { listen } = window.__TAURI__.event;
 
 GlobalWorkerOptions.workerSrc = './vendor/pdfjs/build/pdf.worker.min.mjs';
 
-// A rendered page canvas is the dominant cost in this app: one A4 page at 200%
-// on a 2x display is ~30 MB of RGBA. Capping it keeps huge pages from turning
-// into hundreds of megabytes of resident memory.
 // A rendered page canvas is the dominant per-document cost: one A4 page at 200%
 // on a 2x display is ~30 MB of RGBA. Raising this to 2^23 (which would keep a
 // docked fit-width page on PDF.js's single-canvas path) measured worse here, so
@@ -44,6 +41,9 @@ const ui = {
   zoomOut: el('zoomOut'),
   mode: el('mode'),
   dock: el('dock'),
+  imagePrev: el('imagePrev'),
+  imageNext: el('imageNext'),
+  imageIndex: el('imageIndex'),
   poll: el('poll'),
   waiting: el('waiting'),
   findToggle: el('findToggle'),
@@ -69,6 +69,8 @@ const state = {
   statusTimer: 0,
   pendingRevision: null,
   generation: 0,
+  siblings: [],
+  siblingIndex: -1,
 };
 
 // One worker for the life of the process. getDocument would otherwise spawn a
@@ -329,6 +331,55 @@ async function showPdf(file, view, generation) {
   updatePageControls();
 }
 
+// ── Stepping through a folder ─────────────────────────────────────────────
+
+/// Learn what else is next to the open file, so Left/Right can walk the folder.
+/// Failing quietly is fine — the viewer just loses the arrows.
+async function loadSiblings(file) {
+  state.siblings = [];
+  state.siblingIndex = -1;
+  if (file.kind !== 'image') {
+    updateSiblingControls();
+    return;
+  }
+  try {
+    const found = await invoke('siblings', { path: file.path });
+    state.siblings = Array.isArray(found) ? found : [];
+    state.siblingIndex = state.siblings.indexOf(file.path);
+  } catch {
+    state.siblings = [];
+  }
+  updateSiblingControls();
+}
+
+function updateSiblingControls() {
+  const total = state.siblings.length;
+  const position = state.siblingIndex;
+  const known = position >= 0 && total > 1;
+  ui.imageIndex.textContent = known ? `${position + 1} / ${total}` : '';
+  ui.imagePrev.disabled = !known || position <= 0;
+  ui.imageNext.disabled = !known || position >= total - 1;
+}
+
+/// Step to another file in the folder, keeping the window where it is — a
+/// window that jumped on every arrow press would be unusable for browsing.
+async function stepSibling(delta) {
+  if (state.siblingIndex < 0) {
+    return;
+  }
+  const next = state.siblingIndex + delta;
+  const path = state.siblings[next];
+  if (!path) {
+    return;
+  }
+  try {
+    const file = await invoke('open_path', { path });
+    await openFile(file, { keepWindow: true });
+  } catch (error) {
+    setStatus(String(error), { error: true });
+  }
+}
+
 function showImage(file, fit) {
   ui.image.src = sourceUrl(file);
   ui.image.alt = file.name;
@@ -342,7 +393,7 @@ function showImage(file, fit) {
   );
 }
 
-async function openFile(file, { preserveView = false } = {}) {
+async function openFile(file, { preserveView = false, keepWindow = false } = {}) {
   // Rebuilds can outpace loading; only the newest one may touch the UI.
   const generation = ++state.generation;
   const view = preserveView ? captureView() : null;
@@ -356,7 +407,8 @@ async function openFile(file, { preserveView = false } = {}) {
     if (file.kind === 'pdf') {
       await showPdf(file, view, generation);
     } else if (file.kind === 'image') {
-      showImage(file, !preserveView);
+      showImage(file, !preserveView && !keepWindow);
+      void loadSiblings(file);
     } else {
       setStatus(`Unsupported file type: ${file.name}`, { error: true, sticky: true });
       return;
@@ -602,6 +654,8 @@ ui.zoomIn.addEventListener('click', () => stepZoom(1));
 ui.zoomOut.addEventListener('click', () => stepZoom(-1));
 ui.mode.addEventListener('click', (event) => cycleMode(event.shiftKey || event.altKey));
 ui.dock.addEventListener('click', toggleDock);
+ui.imagePrev.addEventListener('click', () => stepSibling(-1));
+ui.imageNext.addEventListener('click', () => stepSibling(1));
 
 ui.poll.addEventListener('change', () => {
   const seconds = Number(ui.poll.value) || 0;
@@ -701,6 +755,18 @@ window.addEventListener('keydown', (event) => {
   }
   if (key === 'escape' && !ui.find.hidden) {
     closeFind();
+    return;
+  }
+  // Arrows walk the folder in image mode; in a PDF they scroll the page, which
+  // is what a reader expects there.
+  if (state.file?.kind === 'image') {
+    if (key === 'arrowright' || key === 'pagedown' || key === ' ') {
+      event.preventDefault();
+      stepSibling(1);
+    } else if (key === 'arrowleft' || key === 'pageup') {
+      event.preventDefault();
+      stepSibling(-1);
+    }
     return;
   }
   if (state.file?.kind !== 'pdf') {

@@ -121,8 +121,13 @@ assert.match(
 );
 assert.match(
   app,
-  /showImage\(file, !preserveView\)/,
-  'Images must refit only on a fresh open, not on reload.',
+  /showImage\(file, !preserveView && !keepWindow\)/,
+  'Images must refit only on a fresh open — not on reload, and not when stepping through a folder.',
+);
+assert.match(
+  app,
+  /async function stepSibling\(delta\)[\s\S]*?openFile\(file, \{ keepWindow: true \}\)/,
+  'Walking a folder must not resize the window on every arrow press.',
 );
 assert.match(
   app,

@@ -36,6 +36,10 @@ that survives a build deleting and recreating the file mid-compile.
   a whole page into a tall narrow column just shrinks the text. Press it again to undock: the
   window returns to the size of the page and the zoom returns to fit-page. Your place in the
   document survives both moves.
+- **Walk a folder of figures.** Open one image and `←` / `→` (or the toolbar arrows) step
+  through every image next to it, in reading order — `fig2` before `fig10`, not after it. The
+  toolbar shows your position, and the window stays where it is instead of resizing on every
+  press.
 - **PDF and images.** `.pdf`, plus `.png`, `.jpg`, `.webp` and `.avif`.
 - **Follows your system dark mode**, and can recolour PDF pages themselves: night, sepia, or a
   full invert for scans. Shift+click the mode button to go back to plain pages.

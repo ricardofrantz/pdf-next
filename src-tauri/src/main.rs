@@ -150,6 +150,47 @@ fn open_path(
     adopt(&app, &watched, PathBuf::from(path))
 }
 
+/// Sort the way a person reads file names: `fig2` before `fig10`.
+fn natural_key(name: &str) -> Vec<(u64, String)> {
+    let mut parts = Vec::new();
+    let mut characters = name.chars().peekable();
+    while characters.peek().is_some() {
+        let digits: String =
+            std::iter::from_fn(|| characters.next_if(char::is_ascii_digit)).collect();
+        let text: String =
+            std::iter::from_fn(|| characters.next_if(|c| !c.is_ascii_digit())).collect();
+        parts.push((digits.parse::<u64>().unwrap_or(0), text.to_lowercase()));
+    }
+    parts
+}
+
+/// Every file of the same kind sitting next to this one, in reading order, so
+/// the viewer can step through a folder of figures.
+#[tauri::command]
+fn siblings(path: String) -> Vec<String> {
+    let path = PathBuf::from(path);
+    let kind = kind_for(&path);
+    let Some(directory) = path.parent() else {
+        return Vec::new();
+    };
+
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|candidate| candidate.is_file() && kind_for(candidate) == kind)
+        .collect();
+
+    entries.sort_by_key(|candidate| {
+        natural_key(&candidate.file_name().unwrap_or_default().to_string_lossy())
+    });
+    entries
+        .into_iter()
+        .map(|candidate| candidate.to_string_lossy().to_string())
+        .collect()
+}
+
 /// The file this window was launched with, if any.
 #[tauri::command]
 fn initial_file(watched: State<'_, Watched>) -> Option<FileInfo> {
@@ -437,6 +478,7 @@ fn main() {
             window_size,
             set_poll_seconds,
             launch_options,
+            siblings,
             snap_left
         ])
         .setup(|app| {
