@@ -72,6 +72,24 @@ assert.match(
   'A file that reappears after a build must trigger a reload.',
 );
 
+// Window fitting happens on a fresh open only; refitting on every rebuild would
+// make the window jump while you work.
+assert.match(
+  app,
+  /if \(view\) \{[\s\S]*?\} else \{[\s\S]*?await fitWindowTo\(width \/ height\)/,
+  'The window may only be refitted when opening a file, not when reloading it.',
+);
+assert.match(
+  app,
+  /showImage\(file, !preserveView\)/,
+  'Images must refit only on a fresh open, not on reload.',
+);
+assert.match(
+  main,
+  /fn fit_window\([\s\S]*?aspect\.is_finite\(\) && aspect > 0\.05 && aspect < 20\.0/,
+  'A bogus aspect ratio must never be turned into a window size.',
+);
+
 // Security posture, inherited from the extension.
 const csp = config.app?.security?.csp ?? '';
 assert.doesNotMatch(csp, /unsafe-eval/, 'CSP must not allow eval.');

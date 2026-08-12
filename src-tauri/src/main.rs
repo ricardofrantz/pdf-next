@@ -110,6 +110,87 @@ fn initial_file(watched: State<'_, Watched>) -> Option<FileInfo> {
     state.path.as_deref().map(describe)
 }
 
+/// How much bigger the whole window is than its content, in logical pixels.
+fn frame_extents(window: &tauri::Window) -> (f64, f64) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    match (window.outer_size(), window.inner_size()) {
+        (Ok(outer), Ok(inner)) => (
+            f64::from(outer.width.saturating_sub(inner.width)) / scale,
+            f64::from(outer.height.saturating_sub(inner.height)) / scale,
+        ),
+        _ => (0.0, 40.0),
+    }
+}
+
+/// Resize the window so the document fills it without letterboxing, clamped to
+/// the monitor's usable area. `aspect` is the document's width/height; `chrome`
+/// is the toolbar height in logical pixels.
+#[tauri::command]
+fn fit_window(window: tauri::Window, aspect: f64, chrome: f64) -> Result<(), String> {
+    if !(aspect.is_finite() && aspect > 0.05 && aspect < 20.0) {
+        return Err("implausible aspect ratio".into());
+    }
+    let monitor = window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+        .ok_or("no monitor")?;
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    // set_size sets the *inner* size, so the title bar and borders have to come
+    // off the budget or the window ends up under the taskbar.
+    let (frame_width, frame_height) = frame_extents(&window);
+    let available_width = f64::from(area.size.width) / scale - frame_width;
+    let available_height = f64::from(area.size.height) / scale - frame_height;
+
+    const BREATHING_ROOM: f64 = 24.0;
+    const SIDE_MARGIN: f64 = 48.0;
+    const SCROLLBAR: f64 = 16.0;
+
+    let mut content_height = (available_height - BREATHING_ROOM - chrome).max(240.0);
+    let mut content_width = content_height * aspect;
+    let max_width = available_width - SIDE_MARGIN;
+    if content_width > max_width {
+        content_width = max_width;
+        content_height = content_width / aspect;
+    }
+
+    window
+        .set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            content_width + SCROLLBAR,
+            content_height + chrome,
+        )))
+        .map_err(|error| error.to_string())?;
+    window.center().map_err(|error| error.to_string())
+}
+
+/// Fill the left half of the usable screen — the other half is where your
+/// editor lives.
+#[tauri::command]
+fn snap_left(window: tauri::Window) -> Result<(), String> {
+    let monitor = window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+        .ok_or("no monitor")?;
+    let area = monitor.work_area();
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let (frame_width, frame_height) = frame_extents(&window);
+    let frame_width = (frame_width * scale).round() as u32;
+    let frame_height = (frame_height * scale).round() as u32;
+
+    window
+        .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            area.position.x,
+            area.position.y,
+        )))
+        .map_err(|error| error.to_string())?;
+    window
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+            (area.size.width / 2).saturating_sub(frame_width),
+            area.size.height.saturating_sub(frame_height),
+        )))
+        .map_err(|error| error.to_string())
+}
+
 fn theme_name(theme: Theme) -> &'static str {
     match theme {
         Theme::Dark => "dark",
@@ -203,7 +284,9 @@ fn main() {
             open_path,
             initial_file,
             pick_file,
-            os_theme
+            os_theme,
+            fit_window,
+            snap_left
         ])
         .setup(|app| {
             if let Some(path) = first_path_argument() {

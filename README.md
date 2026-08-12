@@ -18,12 +18,17 @@ that survives a build deleting and recreating the file mid-compile.
 - **Watches your file every second.** Rebuild the PDF and the view updates in about a second,
   keeping your page, scroll position and zoom. If the build deletes the file first, the last
   render stays on screen and the indicator turns red until the new file lands.
+- **Fits the window to the document.** Open a portrait paper and you get a portrait window,
+  sized to the page and centred; open a wide figure and the window is wide. It only happens
+  when you open a file — rebuilds never move your window.
+- **Dock to the left half** with `Ctrl+Shift+←` or the toolbar button, so the PDF takes the left
+  half of the screen and your editor keeps the right. Your page and zoom survive the move.
 - **PDF and images.** `.pdf`, plus `.png`, `.jpg`, `.webp` and `.avif`.
 - **Follows your system dark mode**, and can recolour PDF pages themselves: night, sepia, or a
   full invert for scans. Shift+click the mode button to go back to plain pages.
 - **Text search** with match counts, powered by PDF.js.
 - **Keyboard first:** `j`/`k` scroll, `n`/`p` pages, `g`/`G` first and last, `+`/`-` zoom,
-  `Ctrl+F` find, `Ctrl+R` reload, `Ctrl+O` open.
+  `Ctrl+F` find, `Ctrl+R` reload, `Ctrl+O` open, `Ctrl+Shift+←` dock left.
 
 ## Install
 

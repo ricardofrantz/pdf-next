@@ -39,6 +39,7 @@ const ui = {
   zoomIn: el('zoomIn'),
   zoomOut: el('zoomOut'),
   mode: el('mode'),
+  dock: el('dock'),
   findToggle: el('findToggle'),
   find: el('find'),
   findInput: el('findInput'),
@@ -134,6 +135,25 @@ async function releaseDocument() {
   state.document = null;
 }
 
+/// Match the window to the document's shape. Only on a fresh open — doing it on
+/// every rebuild would make the window jump around while you work.
+async function fitWindowTo(aspect) {
+  if (!Number.isFinite(aspect) || aspect <= 0) {
+    return;
+  }
+  const chrome = Number.parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue('--bar-height'),
+  );
+  try {
+    await invoke('fit_window', {
+      aspect,
+      chrome: Number.isFinite(chrome) ? chrome : 36,
+    });
+  } catch {
+    // A window that will not resize is not worth failing the open over.
+  }
+}
+
 async function showPdf(file, view) {
   await releaseDocument();
   const task = getDocument({
@@ -165,14 +185,25 @@ async function showPdf(file, view) {
   if (view) {
     restoreView(view);
   } else {
-    pdfViewer.currentScaleValue = ui.zoom.value || 'auto';
+    const page = await pdfDocument.getPage(1);
+    const { width, height } = page.getViewport({ scale: 1 });
+    await fitWindowTo(width / height);
+    pdfViewer.currentScaleValue = 'page-fit';
+    ui.zoom.value = 'page-fit';
   }
   updatePageControls();
 }
 
-function showImage(file) {
+function showImage(file, fit) {
   ui.image.src = sourceUrl(file);
   ui.image.alt = file.name;
+  if (!fit) {
+    return;
+  }
+  ui.image.decode?.().then(
+    () => fitWindowTo(ui.image.naturalWidth / ui.image.naturalHeight),
+    () => {},
+  );
 }
 
 async function openFile(file, { preserveView = false } = {}) {
@@ -187,7 +218,7 @@ async function openFile(file, { preserveView = false } = {}) {
     if (file.kind === 'pdf') {
       await showPdf(file, view);
     } else if (file.kind === 'image') {
-      showImage(file);
+      showImage(file, !preserveView);
     } else {
       setStatus(`Unsupported file type: ${file.name}`, { error: true, sticky: true });
       return;
@@ -336,6 +367,22 @@ function runFind(type = '', again = false, backwards = false) {
   });
 }
 
+/// Resizing the window keeps the scroll offset in pixels, which lands on a
+/// different page once the layout reflows — so put the reader back where it was.
+async function dockLeft() {
+  const page = state.document ? pdfViewer.currentPageNumber : 0;
+  try {
+    await invoke('snap_left');
+  } catch {
+    return;
+  }
+  if (page > 1) {
+    window.setTimeout(() => {
+      pdfViewer.currentPageNumber = page;
+    }, 160);
+  }
+}
+
 // ── Wiring ────────────────────────────────────────────────────────────────
 
 ui.open.addEventListener('click', async () => {
@@ -377,6 +424,7 @@ ui.zoom.addEventListener('change', () => {
 ui.zoomIn.addEventListener('click', () => stepZoom(1));
 ui.zoomOut.addEventListener('click', () => stepZoom(-1));
 ui.mode.addEventListener('click', (event) => cycleMode(event.shiftKey || event.altKey));
+ui.dock.addEventListener('click', dockLeft);
 ui.findToggle.addEventListener('click', () => (ui.find.hidden ? openFind() : closeFind()));
 ui.findClose.addEventListener('click', closeFind);
 ui.findNext.addEventListener('click', () => runFind('again', true, false));
@@ -396,7 +444,10 @@ ui.findInput.addEventListener('keydown', (event) => {
 eventBus.on('pagechanging', updatePageControls);
 eventBus.on('pagesloaded', updatePageControls);
 eventBus.on('scalechanging', (event) => {
-  updateZoomControl(event.presetValue || String(event.scale), event.scale);
+  // On a window resize PDF.js reports the computed scale with no preset, even
+  // though it is still tracking "fit page" — so fall back to the live value.
+  const value = event.presetValue || pdfViewer.currentScaleValue || event.scale;
+  updateZoomControl(String(value), event.scale);
 });
 eventBus.on('updatefindmatchescount', ({ matchesCount }) => {
   ui.findCount.textContent = matchesCount?.total
@@ -422,6 +473,11 @@ window.addEventListener('keydown', (event) => {
   if ((event.ctrlKey || event.metaKey) && key === 'o') {
     event.preventDefault();
     ui.open.click();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 'arrowleft') {
+    event.preventDefault();
+    dockLeft();
     return;
   }
   if ((event.ctrlKey || event.metaKey) && key === 'f') {
