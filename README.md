@@ -15,12 +15,22 @@ that survives a build deleting and recreating the file mid-compile.
 
 ## What it does
 
-- **Watches your file every second.** Rebuild the PDF and the view updates in about a second,
-  keeping your page, scroll position and zoom. If the build deletes the file first, the last
-  render stays on screen and the indicator turns red until the new file lands.
-- **Fits the window to the document.** Open a portrait paper and you get a portrait window,
-  sized to the page and centred; open a wide figure and the window is wide. It only happens
-  when you open a file — rebuilds never move your window.
+- **Watches your file, on by default.** Rebuild the PDF and the view updates within a second,
+  keeping your page, scroll position and zoom. The interval is in the toolbar — 1s, 2s, 3s, or
+  off. If the build deletes the file first, the last render stays on screen and a red dot
+  appears until the new file lands.
+- **Never shows a half-written file.** A build rewrites a PDF over hundreds of milliseconds and
+  the file's metadata changes the instant it starts, so a naive watcher reloads garbage. Before
+  reloading, pdf-next checks the file is complete: on Windows the writer normally holds an
+  exclusive lock, so simply opening it fails; on macOS and Linux nothing stops you reading a
+  partial file, so PDFs are also checked for their `%%EOF` trailer. If it is not ready, the
+  reload waits for the next tick.
+- **Fits the window to the document.** Open a paper and the window becomes the size of the page
+  itself, centred; open a wide figure and the window is wide. It only happens when you open a
+  file — rebuilds never move your window. With no file open, it stays a small drop target.
+- **Remembers the window size per file.** Resize while reading a paper and reopening it later
+  gives you that window back. Stored with the app's preferences, capped at the 80 most recent
+  files, so there is no cache to manage.
 - **Dock to the left half** with `Ctrl+Shift+←` or the toolbar button, so the PDF takes the left
   half of the screen and your editor keeps the right. Your page and zoom survive the move.
 - **PDF and images.** `.pdf`, plus `.png`, `.jpg`, `.webp` and `.avif`.

@@ -40,6 +40,8 @@ const ui = {
   zoomOut: el('zoomOut'),
   mode: el('mode'),
   dock: el('dock'),
+  poll: el('poll'),
+  waiting: el('waiting'),
   findToggle: el('findToggle'),
   find: el('find'),
   findInput: el('findInput'),
@@ -135,23 +137,78 @@ async function releaseDocument() {
   state.document = null;
 }
 
-/// Match the window to the document's shape. Only on a fresh open — doing it on
-/// every rebuild would make the window jump around while you work.
-async function fitWindowTo(aspect) {
-  if (!Number.isFinite(aspect) || aspect <= 0) {
+// Window sizes are remembered per file, so reopening the same paper gives you
+// back the window you had. Kept in the webview's own storage — no cache file to
+// manage, and it is wiped with the app's data like any other preference.
+const SIZE_KEY = 'pdf-next.sizes';
+const SIZE_LIMIT = 80;
+
+function readSizes() {
+  try {
+    return JSON.parse(localStorage.getItem(SIZE_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function rememberedSize(path) {
+  const entry = readSizes()[path];
+  return Array.isArray(entry) && entry.length === 2 ? entry : null;
+}
+
+function rememberSize(path, width, height) {
+  if (!path || !(width > 80) || !(height > 80)) {
     return;
   }
-  const chrome = Number.parseFloat(
+  const sizes = readSizes();
+  delete sizes[path];
+  sizes[path] = [Math.round(width), Math.round(height)];
+  const paths = Object.keys(sizes);
+  for (const stale of paths.slice(0, Math.max(0, paths.length - SIZE_LIMIT))) {
+    delete sizes[stale];
+  }
+  try {
+    localStorage.setItem(SIZE_KEY, JSON.stringify(sizes));
+  } catch {
+    // Out of quota is not worth interrupting the reader over.
+  }
+}
+
+const barHeight = () => {
+  const value = Number.parseFloat(
     getComputedStyle(document.documentElement).getPropertyValue('--bar-height'),
   );
+  return Number.isFinite(value) ? value : 36;
+};
+
+/// Wrap the window tightly around the document. Only on a fresh open — doing it
+/// on every rebuild would make the window jump around while you work.
+async function fitWindow(width, height, recenter) {
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    return;
+  }
   try {
-    await invoke('fit_window', {
-      aspect,
-      chrome: Number.isFinite(chrome) ? chrome : 36,
-    });
+    await invoke('fit_window', { width, height, recenter });
   } catch {
     // A window that will not resize is not worth failing the open over.
   }
+}
+
+async function sizeToDocument(path, contentWidth, contentHeight) {
+  const saved = rememberedSize(path);
+  if (saved) {
+    await fitWindow(saved[0], saved[1], false);
+    return;
+  }
+  const scrollbar = Math.max(
+    ui.container.offsetWidth - ui.container.clientWidth,
+    0,
+  );
+  await fitWindow(
+    contentWidth + scrollbar,
+    contentHeight + barHeight(),
+    true,
+  );
 }
 
 async function showPdf(file, view) {
@@ -185,11 +242,13 @@ async function showPdf(file, view) {
   if (view) {
     restoreView(view);
   } else {
+    // PDF.js reports page 1 in points; CSS pixels are 96/72 of that.
     const page = await pdfDocument.getPage(1);
-    const { width, height } = page.getViewport({ scale: 1 });
-    await fitWindowTo(width / height);
+    const { width, height } = page.getViewport({
+      scale: 96 / 72,
+    });
+    await sizeToDocument(file.path, width, height);
     pdfViewer.currentScaleValue = 'page-fit';
-    ui.zoom.value = 'page-fit';
   }
   updatePageControls();
 }
@@ -201,7 +260,8 @@ function showImage(file, fit) {
     return;
   }
   ui.image.decode?.().then(
-    () => fitWindowTo(ui.image.naturalWidth / ui.image.naturalHeight),
+    () =>
+      sizeToDocument(file.path, ui.image.naturalWidth, ui.image.naturalHeight),
     () => {},
   );
 }
@@ -425,6 +485,33 @@ ui.zoomIn.addEventListener('click', () => stepZoom(1));
 ui.zoomOut.addEventListener('click', () => stepZoom(-1));
 ui.mode.addEventListener('click', (event) => cycleMode(event.shiftKey || event.altKey));
 ui.dock.addEventListener('click', dockLeft);
+
+ui.poll.addEventListener('change', () => {
+  const seconds = Number(ui.poll.value) || 0;
+  invoke('set_poll_seconds', { seconds });
+  try {
+    localStorage.setItem('pdf-next.poll', String(seconds));
+  } catch {
+    // Preference only.
+  }
+});
+
+// Remember the window size per file, so reopening restores the shape you left.
+let sizeTimer = 0;
+window.addEventListener('resize', () => {
+  if (!state.file) {
+    return;
+  }
+  window.clearTimeout(sizeTimer);
+  sizeTimer = window.setTimeout(async () => {
+    try {
+      const [width, height] = await invoke('window_size');
+      rememberSize(state.file.path, width, height);
+    } catch {
+      // Nothing to remember if the size cannot be read.
+    }
+  }, 600);
+});
 ui.findToggle.addEventListener('click', () => (ui.find.hidden ? openFind() : closeFind()));
 ui.findClose.addEventListener('click', closeFind);
 ui.findNext.addEventListener('click', () => runFind('again', true, false));
@@ -547,10 +634,12 @@ listen('file-changed', async (event) => {
   }
   if (kind === 'missing') {
     document.body.classList.add('file-missing');
-    setStatus('File is gone — waiting for the build to finish', { sticky: true });
+    ui.waiting.hidden = false;
+    setStatus('Rebuilding — waiting for the file', { sticky: true });
     return;
   }
   document.body.classList.remove('file-missing');
+  ui.waiting.hidden = true;
   await openFile({ ...state.file, revision }, { preserveView: true });
   setStatus('Reloaded');
 });
@@ -572,6 +661,17 @@ try {
   setMode(PAGE_MODES.includes(saved) ? saved : null);
 } catch {
   setMode(null);
+}
+
+// Watching is on by default at one second; the control only exists to slow it
+// down or stop it.
+try {
+  const saved = localStorage.getItem('pdf-next.poll');
+  const seconds = ['0', '1', '2', '3'].includes(saved) ? Number(saved) : 1;
+  ui.poll.value = String(seconds);
+  await invoke('set_poll_seconds', { seconds });
+} catch {
+  ui.poll.value = '1';
 }
 
 const initial = await invoke('initial_file');

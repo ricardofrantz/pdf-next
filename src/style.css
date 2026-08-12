@@ -225,36 +225,33 @@ select {
   outline-offset: 1px;
 }
 
-/* Live-reload indicator: green while watching, amber while the file is gone
-   mid-build, so a stalled build is visible without reading any text. */
-#live {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0 6px;
+/* No steady-state indicator: watching is the normal case and does not need to
+   announce itself. The dot only appears while a rebuild has removed the file. */
+#poll {
+  min-width: 58px;
+  padding: 0 2px 0 6px;
   color: var(--fg-dim);
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
-#live .dot {
+body:not(.has-file) #poll {
+  display: none;
+}
+
+#waiting {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+}
+
+#waiting[hidden] {
+  display: none;
+}
+
+#waiting .dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--live);
-}
-
-body.file-missing #live .dot {
   background: var(--error);
-}
-
-body.file-missing #live {
-  color: var(--error);
-}
-
-body:not(.has-file) #live {
-  display: none;
 }
 
 /* ── Stage ───────────────────────────────────────────────────────────── */
@@ -306,10 +303,18 @@ body.mode-invert #image {
   filter: invert(1) hue-rotate(180deg);
 }
 
-/* PDF.js renders pages without an edge; give them one in every mode. */
+/* PDF.js reserves a 9px transparent border and a page margin around every page.
+   Both are dead space in a window sized to the document, so they go to zero and
+   the gap between pages is drawn by the margin alone. */
 .pdfViewer {
   --page-bg-color: #fff;
-  padding: 12px 0;
+  --page-border: 0;
+  --page-margin: 0 auto 8px;
+  padding: 0;
+}
+
+.pdfViewer .page:last-of-type {
+  margin-bottom: 0;
 }
 
 .pdfViewer .page {
@@ -401,8 +406,31 @@ body.mode-invert .pdfViewer .page .canvasWrapper {
   inset: 0;
   display: grid;
   place-content: center;
-  gap: 6px;
+  justify-items: center;
+  gap: 10px;
+  padding: 24px;
   text-align: center;
+  color: var(--fg-dim);
+}
+
+#empty p {
+  margin: 0;
+}
+
+.empty-icon {
+  width: 48px;
+  height: 48px;
+  opacity: 0.55;
+}
+
+.empty-title {
+  color: var(--fg);
+  font-size: 15px;
+}
+
+body.drop-target #empty .empty-icon {
+  opacity: 1;
+  color: var(--accent);
 }
 
 body.has-file #empty {

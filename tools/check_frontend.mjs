@@ -58,8 +58,8 @@ assert.match(
 // The watcher: one second, and a missing file is a state, not a failure.
 assert.match(
   main,
-  /const POLL_INTERVAL: Duration = Duration::from_secs\(1\)/,
-  'The file poll must stay at one second.',
+  /static POLL_SECONDS: AtomicU64 = AtomicU64::new\(1\)/,
+  'Watching must be on by default, at one second.',
 );
 assert.match(
   main,
@@ -76,8 +76,23 @@ assert.match(
 // make the window jump while you work.
 assert.match(
   app,
-  /if \(view\) \{[\s\S]*?\} else \{[\s\S]*?await fitWindowTo\(width \/ height\)/,
+  /if \(view\) \{[\s\S]*?\} else \{[\s\S]*?await sizeToDocument\(file\.path, width, height\)/,
   'The window may only be refitted when opening a file, not when reloading it.',
+);
+assert.match(
+  main,
+  /fn is_complete\(path: &Path\) -> bool \{[\s\S]*?File::open\(path\)[\s\S]*?b"%%EOF"/,
+  'A file must be complete before a reload; a half-written PDF must not be shown.',
+);
+assert.match(
+  main,
+  /if \(changed \|\| reappeared\) && !is_complete\(&path\)/,
+  'The watcher must skip ticks where the file is still being written.',
+);
+assert.match(
+  main,
+  /fn set_poll_seconds\(seconds: u64\)[\s\S]*?POLL_SECONDS\.store/,
+  'The poll cadence must be settable, including 0 for off.',
 );
 assert.match(
   app,
@@ -86,8 +101,8 @@ assert.match(
 );
 assert.match(
   main,
-  /fn fit_window\([\s\S]*?aspect\.is_finite\(\) && aspect > 0\.05 && aspect < 20\.0/,
-  'A bogus aspect ratio must never be turned into a window size.',
+  /fn fit_window\([\s\S]*?width\.is_finite\(\) && height\.is_finite\(\) && width > 80\.0 && height > 80\.0/,
+  'A bogus measurement must never be turned into a window size.',
 );
 
 // Security posture, inherited from the extension.

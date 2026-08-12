@@ -16,7 +16,10 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, Theme, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Poll cadence in seconds; 0 turns watching off. Changing it takes effect on
+/// the next tick.
+static POLL_SECONDS: AtomicU64 = AtomicU64::new(1);
+const IDLE_TICK: Duration = Duration::from_millis(500);
 
 /// Snapshot of the watched file. `missing` is a state, not an error: TeX-style
 /// builds delete and recreate the PDF, and the viewer must hold the last good
@@ -80,6 +83,41 @@ fn stat(path: &Path) -> Option<(Option<SystemTime>, u64)> {
     Some((metadata.modified().ok(), metadata.len()))
 }
 
+/// Is the file finished being written?
+///
+/// A build tool rewrites a PDF over hundreds of milliseconds, and the metadata
+/// changes the moment it starts. Reloading then shows a truncated document. On
+/// Windows the writer usually holds an exclusive lock so `File::open` fails
+/// outright; on macOS and Linux nothing stops us reading a half-written file,
+/// so PDFs are additionally checked for their `%%EOF` trailer.
+fn is_complete(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false; // locked by the writer (Windows) or briefly gone
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    let len = metadata.len();
+    if len == 0 {
+        return false;
+    }
+    if kind_for(path) != "pdf" {
+        return true;
+    }
+
+    let tail = len.min(2048);
+    if file.seek(SeekFrom::End(-(tail as i64))).is_err() {
+        return false;
+    }
+    let mut buffer = vec![0u8; tail as usize];
+    if file.read_exact(&mut buffer).is_err() {
+        return false;
+    }
+    buffer.windows(5).any(|window| window == b"%%EOF")
+}
+
 /// Point the watcher at a file and describe it for the frontend.
 fn adopt(watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
     if !path.exists() {
@@ -122,13 +160,18 @@ fn frame_extents(window: &tauri::Window) -> (f64, f64) {
     }
 }
 
-/// Resize the window so the document fills it without letterboxing, clamped to
-/// the monitor's usable area. `aspect` is the document's width/height; `chrome`
-/// is the toolbar height in logical pixels.
+/// Resize to an exact inner size in logical pixels, clamped to the monitor's
+/// usable area. The frontend measures the rendered page, so the window ends up
+/// wrapped tightly around the document instead of guessing from an aspect ratio.
 #[tauri::command]
-fn fit_window(window: tauri::Window, aspect: f64, chrome: f64) -> Result<(), String> {
-    if !(aspect.is_finite() && aspect > 0.05 && aspect < 20.0) {
-        return Err("implausible aspect ratio".into());
+fn fit_window(
+    window: tauri::Window,
+    width: f64,
+    height: f64,
+    recenter: bool,
+) -> Result<(), String> {
+    if !(width.is_finite() && height.is_finite() && width > 80.0 && height > 80.0) {
+        return Err("implausible window size".into());
     }
     let monitor = window
         .current_monitor()
@@ -142,25 +185,44 @@ fn fit_window(window: tauri::Window, aspect: f64, chrome: f64) -> Result<(), Str
     let available_width = f64::from(area.size.width) / scale - frame_width;
     let available_height = f64::from(area.size.height) / scale - frame_height;
 
-    const BREATHING_ROOM: f64 = 24.0;
-    const SIDE_MARGIN: f64 = 48.0;
-    const SCROLLBAR: f64 = 16.0;
-
-    let mut content_height = (available_height - BREATHING_ROOM - chrome).max(240.0);
-    let mut content_width = content_height * aspect;
-    let max_width = available_width - SIDE_MARGIN;
-    if content_width > max_width {
-        content_width = max_width;
-        content_height = content_width / aspect;
+    let aspect = width / height;
+    let mut inner_width = width.min(available_width);
+    let mut inner_height = height.min(available_height);
+    // Keep the document's proportions when the screen forces a clamp.
+    if inner_width < width {
+        inner_height = inner_height.min(inner_width / aspect);
+    }
+    if inner_height < height {
+        inner_width = inner_width.min(inner_height * aspect);
     }
 
     window
         .set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            content_width + SCROLLBAR,
-            content_height + chrome,
+            inner_width.max(320.0),
+            inner_height.max(240.0),
         )))
         .map_err(|error| error.to_string())?;
-    window.center().map_err(|error| error.to_string())
+    if recenter {
+        window.center().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Current inner size in logical pixels, so the frontend can remember it.
+#[tauri::command]
+fn window_size(window: tauri::Window) -> Result<(f64, f64), String> {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let size = window.inner_size().map_err(|error| error.to_string())?;
+    Ok((
+        f64::from(size.width) / scale,
+        f64::from(size.height) / scale,
+    ))
+}
+
+/// 0 turns the watcher off; anything else is the poll cadence in seconds.
+#[tauri::command]
+fn set_poll_seconds(seconds: u64) {
+    POLL_SECONDS.store(seconds.min(60), Ordering::Relaxed);
 }
 
 /// Fill the left half of the usable screen — the other half is where your
@@ -222,7 +284,12 @@ async fn pick_file(app: AppHandle) -> Option<String> {
 /// recompile shows up before you look back at the window.
 fn spawn_watcher(app: AppHandle) {
     std::thread::spawn(move || loop {
-        std::thread::sleep(POLL_INTERVAL);
+        let seconds = POLL_SECONDS.load(Ordering::Relaxed);
+        if seconds == 0 {
+            std::thread::sleep(IDLE_TICK);
+            continue;
+        }
+        std::thread::sleep(Duration::from_secs(seconds));
 
         let Some(watched) = app.try_state::<Watched>() else {
             continue;
@@ -238,6 +305,11 @@ fn spawn_watcher(app: AppHandle) {
             Some((modified, len)) => {
                 let changed = modified != state.modified || len != state.len;
                 let reappeared = state.missing;
+                if (changed || reappeared) && !is_complete(&path) {
+                    // Still being written. Leave the recorded stat alone so the
+                    // next tick sees it as a change again.
+                    continue;
+                }
                 state.modified = modified;
                 state.len = len;
                 state.missing = false;
@@ -286,6 +358,8 @@ fn main() {
             pick_file,
             os_theme,
             fit_window,
+            window_size,
+            set_poll_seconds,
             snap_left
         ])
         .setup(|app| {
