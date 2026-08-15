@@ -44,7 +44,14 @@ const ui = {
   zoomOut: el('zoomOut'),
   mode: el('mode'),
   wrap: el('wrap'),
-  dock: el('dock'),
+  raw: el('raw'),
+  dockButtons: {
+    left: el('dockLeft'),
+    right: el('dockRight'),
+    top: el('dockTop'),
+    bottom: el('dockBottom'),
+    center: el('dockCenter'),
+  },
   tabs: el('tabs'),
   stage: el('stage'),
   imagePrev: el('imagePrev'),
@@ -52,6 +59,7 @@ const ui = {
   imageIndex: el('imageIndex'),
   poll: el('poll'),
   waiting: el('waiting'),
+  update: el('update'),
   findToggle: el('findToggle'),
   find: el('find'),
   findInput: el('findInput'),
@@ -63,6 +71,9 @@ const ui = {
   viewer: el('viewer'),
   image: el('image'),
   imageStage: el('imageStage'),
+  markdown: el('markdown'),
+  markdownRaw: el('markdownRaw'),
+  markdownStage: el('markdownStage'),
   status: el('status'),
 };
 
@@ -72,10 +83,18 @@ const state = {
   task: null,
   mode: null,
   natural: null,
-  docked: false,
+  /// Which screen half the window fills, or null when it is free.
+  docked: null,
   wrap: false,
   imageScale: 'fit',
+  markdownScale: 1,
+  markdownRaw: false,
   statusTimer: 0,
+  /// This build and its platform, from Rust; and the newer release a check
+  /// found, if any — { version, url } — which turns the button into a download.
+  version: '',
+  platform: '',
+  update: null,
   pendingRevision: null,
   generation: 0,
   siblings: [],
@@ -153,6 +172,15 @@ function captureView() {
       left: ui.imageStage.scrollLeft,
     };
   }
+  if (state.file?.kind === 'markdown') {
+    return {
+      kind: 'markdown',
+      scale: state.markdownScale,
+      raw: state.markdownRaw,
+      top: ui.markdownStage.scrollTop,
+      left: ui.markdownStage.scrollLeft,
+    };
+  }
   if (!state.document) {
     return null;
   }
@@ -166,7 +194,7 @@ function captureView() {
 }
 
 function restoreView(view) {
-  if (!view || view.kind === 'image') {
+  if (!view || view.kind !== 'pdf') {
     return;
   }
   pdfViewer.currentScaleValue = view.scale;
@@ -189,8 +217,12 @@ function restoreImageView(view) {
 
 // ── Loading ───────────────────────────────────────────────────────────────
 
+// Served by the doc protocol with Cache-Control: no-store, so the webview's
+// HTTP cache never accumulates a copy per revision. The revision query still
+// matters: it makes each reload a distinct URL, so nothing in the pipeline can
+// answer from memory.
 function sourceUrl(file) {
-  return `${convertFileSrc(file.path)}?v=${file.revision}`;
+  return `${convertFileSrc(file.path, 'doc')}?v=${file.revision}`;
 }
 
 /// Tear the previous document down completely before loading the next one.
@@ -226,12 +258,20 @@ async function releaseDocument() {
 const SIZE_KEY = 'pdf-next.sizes';
 const SIZE_LIMIT = 80;
 
+// Parsed once and kept: the map is consulted on every open and every resize,
+// and re-parsing JSON out of localStorage each time is pure waste.
+let sizesCache = null;
+
 function readSizes() {
-  try {
-    return JSON.parse(localStorage.getItem(SIZE_KEY) || '{}');
-  } catch {
-    return {};
+  if (sizesCache) {
+    return sizesCache;
   }
+  try {
+    sizesCache = JSON.parse(localStorage.getItem(SIZE_KEY) || '{}');
+  } catch {
+    sizesCache = {};
+  }
+  return sizesCache;
 }
 
 function rememberedSize(path) {
@@ -359,6 +399,81 @@ function imageContainScale() {
   );
 }
 
+// ── Markdown ──────────────────────────────────────────────────────────────
+
+// A reading column plus its margins. The window a fresh markdown file opens
+// into, before the reader resizes it and the per-file memory takes over.
+const MARKDOWN_WINDOW_WIDTH = 780;
+
+/// Rendered or raw. Both nodes stay in the DOM with the same content, so the
+/// toggle is a visibility flip — no re-render, no IPC round trip.
+function setRaw(on, { persist = true } = {}) {
+  state.markdownRaw = on;
+  ui.markdown.hidden = on;
+  ui.markdownRaw.hidden = !on;
+  ui.raw.classList.toggle('on', on);
+  ui.raw.setAttribute('aria-pressed', String(on));
+  if (!persist) {
+    return;
+  }
+  try {
+    localStorage.setItem('pdf-next.md-raw', on ? '1' : '');
+  } catch {
+    // Preference only.
+  }
+}
+
+/// Markdown zoom is CSS zoom on the column: the text reflows at the new size,
+/// which is what zooming prose should do — no bitmap scaling involved.
+function setMarkdownScale(scale) {
+  state.markdownScale = scale;
+  ui.markdown.style.zoom = String(scale);
+  ui.markdownRaw.style.zoom = String(scale);
+  updateZoomControl(String(scale), scale);
+}
+
+/// The HTML arrives already sanitized — ammonia ran on the Rust side — so
+/// assigning innerHTML here does not hand the document a script surface, and
+/// the CSP forbids inline script besides.
+async function showMarkdown(file, view, generation, fit) {
+  await releaseDocument();
+  const doc = await invoke('read_markdown', { path: file.path });
+  if (state.generation !== generation) {
+    return;
+  }
+  ui.markdown.innerHTML = doc.html;
+  ui.markdownRaw.textContent = doc.raw;
+  setRaw(view?.raw ?? state.markdownRaw, { persist: false });
+  setMarkdownScale(view?.scale || 1);
+  // Measured with the content laid out; used by undock as well as the fit.
+  state.natural = {
+    width: MARKDOWN_WINDOW_WIDTH,
+    height: Math.max(ui.markdownStage.scrollHeight, 320),
+  };
+  if (view) {
+    ui.markdownStage.scrollTop = view.top;
+    ui.markdownStage.scrollLeft = view.left;
+    return;
+  }
+  ui.markdownStage.scrollTop = 0;
+  if (!fit) {
+    return;
+  }
+  const saved = rememberedSize(file.path);
+  if (saved) {
+    await fitWindow(saved[0], saved[1], false);
+  } else {
+    // Exact: a long document clamps to the screen height without dragging the
+    // width down with it, which aspect preservation would do.
+    await fitWindow(
+      MARKDOWN_WINDOW_WIDTH,
+      state.natural.height + chromeHeight(),
+      true,
+      true,
+    );
+  }
+}
+
 // ── Fitting the window to the content ─────────────────────────────────────
 
 /// The size of what is on screen right now, in logical pixels. Read off the
@@ -458,7 +573,7 @@ async function toggleWrap() {
   if (state.docked) {
     // The dock sets an explicit half-screen size; wrap is about to override it,
     // so the pip should stop claiming the window is docked.
-    setDocked(false);
+    setDocked(null);
   }
   await applyWrap();
 }
@@ -628,7 +743,18 @@ async function openFile(
   document.body.classList.add('has-file');
   document.body.classList.toggle('kind-pdf', file.kind === 'pdf');
   document.body.classList.toggle('kind-image', file.kind === 'image');
+  document.body.classList.toggle('kind-markdown', file.kind === 'markdown');
   document.title = `${file.name} — pdf-next`;
+
+  // Free what the outgoing kind was holding: a decoded bitmap or a rendered
+  // markdown DOM kept behind another tab is memory doing nothing.
+  if (file.kind !== 'image') {
+    ui.image.removeAttribute('src');
+  }
+  if (file.kind !== 'markdown') {
+    ui.markdown.textContent = '';
+    ui.markdownRaw.textContent = '';
+  }
 
   try {
     if (file.kind === 'pdf') {
@@ -636,6 +762,8 @@ async function openFile(
     } else if (file.kind === 'image') {
       showImage(file, !view && !keepWindow, view);
       void loadSiblings(file);
+    } else if (file.kind === 'markdown') {
+      await showMarkdown(file, view, generation, !view && !keepWindow);
     } else {
       setStatus(`Unsupported file type: ${file.name}`, { error: true, sticky: true });
       return;
@@ -821,8 +949,16 @@ async function closeAll() {
   state.pendingRevision = null;
   await releaseDocument();
   ui.image.removeAttribute('src');
+  ui.markdown.textContent = '';
+  ui.markdownRaw.textContent = '';
   setImageScale('fit', { refit: false });
-  document.body.classList.remove('has-file', 'kind-pdf', 'kind-image', 'file-missing');
+  document.body.classList.remove(
+    'has-file',
+    'kind-pdf',
+    'kind-image',
+    'kind-markdown',
+    'file-missing',
+  );
   document.title = 'pdf-next';
   ui.waiting.hidden = true;
   updateSiblingControls();
@@ -876,11 +1012,17 @@ function removeCustomZoom() {
 }
 
 function stepZoom(direction) {
-  const image = state.file?.kind === 'image';
-  if (!image && !state.document) {
+  const kind = state.file?.kind;
+  const image = kind === 'image';
+  const markdown = kind === 'markdown';
+  if (!image && !markdown && !state.document) {
     return;
   }
-  const current = image ? imageScale() : pdfViewer.currentScale;
+  const current = image
+    ? imageScale()
+    : markdown
+      ? state.markdownScale
+      : pdfViewer.currentScale;
   const next =
     direction > 0
       ? ZOOM_STEPS.find((step) => step > current + 0.001)
@@ -890,6 +1032,8 @@ function stepZoom(direction) {
   }
   if (image) {
     setImageScale(next);
+  } else if (markdown) {
+    setMarkdownScale(next);
   } else {
     pdfViewer.currentScaleValue = String(next);
   }
@@ -899,6 +1043,12 @@ function stepZoom(direction) {
 /// is no page, so "fit page" is the scale that contains it and the other two
 /// fits are the CSS default, which fills the width and lets the height run.
 function applyZoomChoice(value) {
+  if (state.file?.kind === 'markdown') {
+    // Prose has no page to fit; every preset lands back at the natural size.
+    const scale = Number(value);
+    setMarkdownScale(Number.isFinite(scale) && scale > 0 ? scale : 1);
+    return;
+  }
   if (state.file?.kind !== 'image') {
     pdfViewer.currentScaleValue = value;
     return;
@@ -1006,15 +1156,19 @@ function runFind(type = '', again = false, backwards = false) {
   });
 }
 
-/// One button, two states. Docked is a tall half-screen column, where fitting
-/// the whole page just shrinks the text — so it fits the width. Undocked is the
-/// automatic fit: the window wrapped around the page again, at fit-page.
+/// Five targets, one function. An edge fills that half of the screen; center —
+/// or the edge the window is already on — undocks: the automatic fit, the
+/// window wrapped around the page again, at fit-page.
 ///
-/// Resizing keeps the scroll offset in pixels, which lands on a different page
-/// once the layout reflows, so the reader goes back where it was either way.
-async function toggleDock() {
+/// A tall half (left, right) fits the width, because fitting the whole page
+/// into a narrow column just shrinks the text; a short half (top, bottom)
+/// fits the page, because fit-width there would leave most of it below the
+/// fold. Resizing keeps the scroll offset in pixels, which lands on a
+/// different page once the layout reflows, so the reader goes back where it
+/// was either way.
+async function dockTo(edge) {
   const page = state.document ? pdfViewer.currentPageNumber : 0;
-  const docking = !state.docked;
+  const undocking = edge === 'center' || state.docked === edge;
   // Docking sets an explicit half-screen size, which wrap would immediately
   // undo. Only one of them can own the window.
   if (state.wrap) {
@@ -1023,40 +1177,43 @@ async function toggleDock() {
   }
 
   try {
-    if (docking) {
-      await invoke('snap_left');
-    } else {
+    if (undocking) {
       const auto = autoWindowSize();
       if (!auto) {
         return;
       }
       await fitWindow(auto[0], auto[1], true);
+    } else {
+      await invoke('snap', { edge });
     }
   } catch {
     return;
   }
 
-  setDocked(docking);
+  setDocked(undocking ? null : edge);
   if (!state.document) {
     return;
   }
   window.setTimeout(() => {
-    pdfViewer.currentScaleValue = docking ? 'page-width' : 'page-fit';
+    pdfViewer.currentScaleValue =
+      !undocking && (edge === 'left' || edge === 'right')
+        ? 'page-width'
+        : 'page-fit';
     if (page > 1) {
       pdfViewer.currentPageNumber = page;
     }
   }, 160);
 }
 
-function setDocked(docked) {
-  state.docked = docked;
-  ui.dock.classList.toggle('on', docked);
-  ui.dock.setAttribute('aria-pressed', String(docked));
-  const label = docked
-    ? 'Undock and fit the window to the page (Ctrl+Shift+Left)'
-    : 'Fill the left half of the screen (Ctrl+Shift+Left)';
-  ui.dock.title = label;
-  ui.dock.setAttribute('aria-label', label);
+function setDocked(edge) {
+  state.docked = edge;
+  for (const [name, button] of Object.entries(ui.dockButtons)) {
+    if (name === 'center') {
+      continue; // an action, not a state — it never lights up
+    }
+    button.classList.toggle('on', edge === name);
+    button.setAttribute('aria-pressed', String(edge === name));
+  }
 }
 
 // ── Wiring ────────────────────────────────────────────────────────────────
@@ -1106,8 +1263,105 @@ ui.zoom.addEventListener('change', () => {
 ui.zoomIn.addEventListener('click', () => stepZoom(1));
 ui.zoomOut.addEventListener('click', () => stepZoom(-1));
 ui.mode.addEventListener('click', (event) => cycleMode(event.shiftKey || event.altKey));
+// ── Updates ───────────────────────────────────────────────────────────────
+//
+// One button and nothing automatic: the app never touches the network unless
+// you press it. A press asks GitHub for the latest release; if it is newer,
+// the same button becomes the download — opened in your browser, so the file
+// arrives visibly, from the repo, the same way a first install does.
+
+const RELEASES_API =
+  'https://api.github.com/repos/ricardofrantz/pdf-next/releases/latest';
+
+/// `v0.6.0` or `0.6.0` → [0, 6, 0]; anything else → null.
+function parseVersion(text) {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(text || '');
+  return match ? match.slice(1, 4).map(Number) : null;
+}
+
+function isNewer(candidate, current) {
+  for (let i = 0; i < 3; i += 1) {
+    if (candidate[i] !== current[i]) {
+      return candidate[i] > current[i];
+    }
+  }
+  return false;
+}
+
+/// The installer for this platform, in order of preference; null when the
+/// release has none, in which case the release page itself is the target.
+function pickAsset(assets, platform) {
+  const preferred = {
+    windows: [/-setup\.exe$/i, /\.msi$/i],
+    macos: [/\.dmg$/i],
+    linux: [/\.AppImage$/i, /\.deb$/i, /\.rpm$/i],
+  }[platform] || [];
+  for (const pattern of preferred) {
+    const asset = assets.find((entry) => pattern.test(entry?.name || ''));
+    if (asset?.browser_download_url) {
+      return asset.browser_download_url;
+    }
+  }
+  return null;
+}
+
+async function checkForUpdates() {
+  if (state.update) {
+    try {
+      await invoke('open_download', { url: state.update.url });
+      setStatus(`Downloading pdf-next ${state.update.version} in your browser`);
+    } catch (error) {
+      setStatus(String(error), { error: true });
+    }
+    return;
+  }
+  ui.update.disabled = true;
+  setStatus('Checking for updates…', { sticky: true });
+  try {
+    const response = await fetch(RELEASES_API, {
+      headers: { Accept: 'application/vnd.github+json' },
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      throw new Error(`GitHub answered ${response.status}`);
+    }
+    const release = await response.json();
+    const latest = parseVersion(release?.tag_name);
+    const current = parseVersion(state.version);
+    if (!latest || !current) {
+      throw new Error('could not read the version number');
+    }
+    if (!isNewer(latest, current)) {
+      setStatus(`You have the latest version (${state.version})`);
+      return;
+    }
+    const version = latest.join('.');
+    const url = pickAsset(release?.assets || [], state.platform) || release?.html_url;
+    if (typeof url !== 'string') {
+      throw new Error('the release has nothing to download');
+    }
+    state.update = { version, url };
+    ui.update.classList.add('available');
+    ui.update.title = `Download pdf-next ${version}`;
+    ui.update.setAttribute('aria-label', ui.update.title);
+    setStatus(`pdf-next ${version} is available — press the button again to download it`, {
+      sticky: true,
+    });
+  } catch (error) {
+    setStatus(`Could not check for updates: ${error?.message || error}`, {
+      error: true,
+    });
+  } finally {
+    ui.update.disabled = false;
+  }
+}
+
+ui.update.addEventListener('click', checkForUpdates);
 ui.wrap.addEventListener('click', toggleWrap);
-ui.dock.addEventListener('click', toggleDock);
+ui.raw.addEventListener('click', () => setRaw(!state.markdownRaw));
+for (const [edge, button] of Object.entries(ui.dockButtons)) {
+  button.addEventListener('click', () => dockTo(edge));
+}
 ui.imagePrev.addEventListener('click', () => stepSibling(-1));
 ui.imageNext.addEventListener('click', () => stepSibling(1));
 
@@ -1189,14 +1443,30 @@ window.addEventListener('keydown', (event) => {
     ui.open.click();
     return;
   }
-  if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 'arrowleft') {
-    event.preventDefault();
-    toggleDock();
-    return;
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey) {
+    const dockKeys = {
+      arrowleft: 'left',
+      arrowright: 'right',
+      arrowup: 'top',
+      arrowdown: 'bottom',
+      enter: 'center',
+    };
+    if (dockKeys[key]) {
+      event.preventDefault();
+      void dockTo(dockKeys[key]);
+      return;
+    }
   }
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 'f') {
     event.preventDefault();
     void toggleWrap();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && key === 'u') {
+    event.preventDefault();
+    if (state.file?.kind === 'markdown') {
+      setRaw(!state.markdownRaw);
+    }
     return;
   }
   if ((event.ctrlKey || event.metaKey) && key === 'w') {
@@ -1265,6 +1535,26 @@ window.addEventListener('keydown', (event) => {
     }
     return;
   }
+  // The same reading keys work on a markdown column as on a PDF.
+  if (state.file?.kind === 'markdown') {
+    switch (key) {
+      case 'j':
+        ui.markdownStage.scrollBy({ top: 90 });
+        break;
+      case 'k':
+        ui.markdownStage.scrollBy({ top: -90 });
+        break;
+      case 'g':
+        ui.markdownStage.scrollTo({
+          top: event.shiftKey ? ui.markdownStage.scrollHeight : 0,
+        });
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    return;
+  }
   if (state.file?.kind !== 'pdf') {
     return;
   }
@@ -1290,17 +1580,25 @@ window.addEventListener('keydown', (event) => {
   event.preventDefault();
 });
 
-// Drag and drop, straight from the OS. Several files at once open as tabs, and
-// the first one is the one you end up looking at.
-listen('tauri://drag-drop', async (event) => {
-  const paths = event.payload?.paths || [];
+// Files arriving from outside: dropped on the window, double-clicked in the
+// Finder, or handed over by a second `pdf-next file.pdf` while this one runs.
+// Several at once open as tabs, and the first one is the one you end up
+// looking at.
+async function openMany(paths) {
   for (const path of paths) {
     await openPath(path);
   }
   if (paths.length > 1) {
     await activateTab(state.tabs.findIndex((tab) => tab.path === paths[0]));
   }
-});
+}
+
+listen('tauri://drag-drop', (event) => openMany(event.payload?.paths || []));
+// Registered before startup asks for `pending_files`, so nothing can fall in
+// the gap between the two.
+const openFilesReady = listen('open-files', (event) =>
+  openMany(Array.isArray(event.payload) ? event.payload : []),
+);
 
 // The watcher fires at most once a second, and only when something moved.
 listen('file-changed', async (event) => {
@@ -1328,7 +1626,18 @@ listen('file-changed', async (event) => {
 });
 
 document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState !== 'visible' || state.pendingRevision === null) {
+  if (document.visibilityState === 'hidden') {
+    // A hidden window does not need warm font and image caches; they rebuild
+    // lazily on return. cleanup() refuses to run mid-render, which is fine —
+    // that tick is simply skipped.
+    try {
+      await state.document?.cleanup();
+    } catch {
+      // Rendering in flight; nothing to free this time.
+    }
+    return;
+  }
+  if (state.pendingRevision === null) {
     return;
   }
   const revision = state.pendingRevision;
@@ -1357,6 +1666,14 @@ try {
   setMode(null);
 }
 
+// Raw markdown is a way of reading, not a per-file quirk, so it is a global
+// preference like the page mode.
+try {
+  setRaw(localStorage.getItem('pdf-next.md-raw') === '1', { persist: false });
+} catch {
+  setRaw(false, { persist: false });
+}
+
 // Watching is on by default at one second; the control only exists to slow it
 // down or stop it.
 try {
@@ -1370,6 +1687,8 @@ try {
 
 // Command-line flags style this launch without changing saved preferences.
 const launch = await invoke('launch_options').catch(() => ({}));
+state.version = String(launch?.version || '');
+state.platform = String(launch?.platform || '');
 if (launch?.poll !== null && launch?.poll !== undefined) {
   ui.poll.value = String(launch.poll);
 }
@@ -1381,17 +1700,24 @@ if (launch?.mode) {
 }
 
 const initial = await invoke('initial_file');
+// Files that reached the app before this code was listening — a Finder
+// double-click on macOS lands here. Asking also switches the app to live
+// `open-files` events, so the listener must be in place first.
+await openFilesReady;
+const pending = await invoke('pending_files').catch(() => []);
 if (initial) {
   await openInTab(initial);
   // Extra paths on the command line become tabs; the first one stays showing.
-  for (const path of launch?.rest || []) {
+  for (const path of [...(launch?.rest || []), ...pending]) {
     await openPath(path);
   }
   if (state.tabs.length > 1) {
     await activateTab(0);
   }
-  if (launch?.dock) {
-    await toggleDock();
+  if (['left', 'right', 'top', 'bottom'].includes(launch?.dock)) {
+    await dockTo(launch.dock);
   }
+} else if (pending.length) {
+  await openMany(pending);
 }
 ui.container.focus();

@@ -1,10 +1,12 @@
-// pdf-next — a tiny PDF/PNG viewer that reloads when the file changes.
+// pdf-next — a tiny PDF/PNG/Markdown viewer that reloads when the file changes.
 //
-// The Rust side does four things and nothing else: resolve the file to open,
-// hand its path to the webview, watch it once a second, and open a file dialog
-// on request. All rendering lives in the frontend.
+// The Rust side does five things and nothing else: resolve the file to open,
+// serve its bytes to the webview, watch it once a second, render markdown to
+// sanitized HTML, and open a file dialog on request. PDF and image rendering
+// live in the frontend.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -13,7 +15,7 @@ use std::sync::{
 use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State, Theme, WindowEvent};
+use tauri::{http, AppHandle, Emitter, Manager, State, Theme, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
 /// Poll cadence in seconds; 0 turns watching off. Changing it takes effect on
@@ -30,6 +32,16 @@ struct WatchState {
     modified: Option<SystemTime>,
     len: u64,
     missing: bool,
+    /// Every file the reader has opened this session, canonicalized. This is
+    /// the whole trust boundary for file access: the doc protocol and the
+    /// markdown renderer serve members of this set and nothing else.
+    allowed: HashSet<PathBuf>,
+    /// Files that arrived before the frontend was listening — from a Finder
+    /// double-click on macOS, or a second `pdf-next` run — waiting to be
+    /// collected by `pending_files`. Once `ready` is set they are emitted
+    /// live instead.
+    pending: Vec<String>,
+    ready: bool,
 }
 
 #[derive(Default)]
@@ -62,6 +74,7 @@ fn kind_for(path: &Path) -> &'static str {
     {
         Some("pdf") => "pdf",
         Some("png" | "jpg" | "jpeg" | "webp" | "avif" | "gif" | "bmp") => "image",
+        Some("md" | "markdown") => "markdown",
         _ => "unknown",
     }
 }
@@ -121,33 +134,29 @@ fn is_complete(path: &Path) -> bool {
 /// Point the watcher at a file and describe it for the frontend.
 ///
 /// This is also where the webview earns the right to read that one file: the
-/// configured asset scope is empty, so nothing else on disk is reachable even
-/// if a document manages to run script at the app origin.
-fn adopt(app: &AppHandle, watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
+/// doc protocol serves only paths recorded here, so nothing else on disk is
+/// reachable even if a document manages to run script at the app origin.
+fn adopt(watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()));
     }
     let canonical = std::fs::canonicalize(&path).unwrap_or(path);
     let (modified, len) = stat(&canonical).unwrap_or((None, 0));
-    let _ = app.asset_protocol_scope().allow_file(&canonical);
 
     let mut state = watched.0.lock().map_err(|error| error.to_string())?;
     state.path = Some(canonical.clone());
     state.modified = modified;
     state.len = len;
     state.missing = false;
+    state.allowed.insert(canonical.clone());
     drop(state);
 
     Ok(describe(&canonical))
 }
 
 #[tauri::command]
-fn open_path(
-    app: AppHandle,
-    path: String,
-    watched: State<'_, Watched>,
-) -> Result<FileInfo, String> {
-    adopt(&app, &watched, PathBuf::from(path))
+fn open_path(path: String, watched: State<'_, Watched>) -> Result<FileInfo, String> {
+    adopt(&watched, PathBuf::from(path))
 }
 
 /// Sort the way a person reads file names: `fig2` before `fig10`.
@@ -196,6 +205,204 @@ fn siblings(path: String) -> Vec<String> {
 fn initial_file(watched: State<'_, Watched>) -> Option<FileInfo> {
     let state = watched.0.lock().ok()?;
     state.path.as_deref().map(describe)
+}
+
+/// Files handed to the app before the frontend was listening. Calling this
+/// also marks the frontend ready, so anything that arrives afterwards comes as
+/// an `open-files` event instead.
+#[tauri::command]
+fn pending_files(watched: State<'_, Watched>) -> Vec<String> {
+    let Ok(mut state) = watched.0.lock() else {
+        return Vec::new();
+    };
+    state.ready = true;
+    std::mem::take(&mut state.pending)
+}
+
+/// Hand files to the window, however they arrived: a Finder double-click or
+/// `open -a pdf-next x.pdf` on macOS, or a second `pdf-next x.pdf` while the
+/// first is running. Live when the frontend is listening; otherwise the first
+/// becomes the launch file and the rest wait for `pending_files`.
+fn deliver(app: &AppHandle, paths: Vec<PathBuf>) {
+    let paths: Vec<String> = paths
+        .into_iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .map(|path| path.to_string_lossy().to_string())
+        .collect();
+    if paths.is_empty() {
+        return;
+    }
+    let Some(watched) = app.try_state::<Watched>() else {
+        return;
+    };
+    let ready = {
+        let Ok(mut state) = watched.0.lock() else {
+            return;
+        };
+        if !state.ready {
+            let mut paths = paths.iter();
+            if state.path.is_none() {
+                if let Some(first) = paths.next() {
+                    drop(state);
+                    let _ = adopt(&watched, PathBuf::from(first));
+                    state = match watched.0.lock() {
+                        Ok(state) => state,
+                        Err(_) => return,
+                    };
+                }
+            }
+            state.pending.extend(paths.cloned());
+        }
+        state.ready
+    };
+    if ready {
+        let _ = app.emit("open-files", &paths);
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+// ── Markdown ──────────────────────────────────────────────────────────────
+
+/// Markdown is a text format; anything bigger than this is not a document a
+/// person is reading, and rendering it would only stall the reload loop.
+const MARKDOWN_LIMIT: u64 = 10 * 1024 * 1024;
+
+#[derive(Serialize)]
+struct MarkdownDoc {
+    html: String,
+    raw: String,
+}
+
+/// CommonMark plus the GitHub extras people actually write, sanitized before
+/// it crosses to the webview. The threat model is the same as for PDFs: the
+/// attacker controls every byte of the file, and the rendered HTML lands in
+/// the app origin — so scripts, event handlers and javascript: URLs must not
+/// survive, and they don't: ammonia strips everything outside its allowlist.
+/// Images are dropped too, deliberately: loading them would widen file access
+/// beyond the one file the reader opened.
+fn render_markdown(source: &str) -> String {
+    use pulldown_cmark::{html, Options, Parser};
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options.insert(Options::ENABLE_SMART_PUNCTUATION);
+    let mut rendered = String::with_capacity(source.len() + source.len() / 2);
+    html::push_html(&mut rendered, Parser::new_ext(source, options));
+
+    let mut builder = ammonia::Builder::default();
+    builder.rm_tags(["img"]);
+    // Task-list checkboxes; forms are inert anyway (form-action 'none').
+    builder.add_tags(["input"]);
+    builder.add_tag_attributes("input", ["type", "checked", "disabled"]);
+    builder.clean(&rendered).to_string()
+}
+
+/// Rendered and raw in one call, so the raw/rendered toggle costs nothing.
+/// Only files the reader has opened may be read — same boundary as the bytes.
+#[tauri::command]
+fn read_markdown(path: String, watched: State<'_, Watched>) -> Result<MarkdownDoc, String> {
+    let canonical =
+        std::fs::canonicalize(PathBuf::from(path)).map_err(|error| error.to_string())?;
+    {
+        let state = watched.0.lock().map_err(|error| error.to_string())?;
+        if !state.allowed.contains(&canonical) {
+            return Err("file was never opened".into());
+        }
+    }
+    if kind_for(&canonical) != "markdown" {
+        return Err("not a markdown file".into());
+    }
+    let metadata = std::fs::metadata(&canonical).map_err(|error| error.to_string())?;
+    if metadata.len() > MARKDOWN_LIMIT {
+        return Err("markdown file is larger than 10 MB".into());
+    }
+    let raw = std::fs::read_to_string(&canonical).map_err(|error| error.to_string())?;
+    let html = render_markdown(&raw);
+    Ok(MarkdownDoc { html, raw })
+}
+
+// ── Serving document bytes ────────────────────────────────────────────────
+
+fn mime_for(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("pdf") => "application/pdf",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("gif") => "image/gif",
+        Some("bmp") => "image/bmp",
+        Some("md" | "markdown") => "text/markdown",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The `doc://` protocol carries document bytes into the webview, replacing
+/// the asset protocol. Two reasons it exists:
+///
+/// Memory: every reload used to hit the webview's HTTP cache under a fresh
+/// cache-busted URL, growing the process by ~10 MB per reload of a real paper.
+/// `Cache-Control: no-store` keeps revisions out of the cache entirely.
+///
+/// Security: the allowlist check lives in this handler, in our own code, and
+/// the served set is exactly the files the reader has opened this session.
+fn serve_document(app: &AppHandle, request: &http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
+    let deny = |status: u16| {
+        http::Response::builder()
+            .status(status)
+            .header("Cache-Control", "no-store")
+            .body(Vec::new())
+            .expect("static response")
+    };
+    if request.method() != http::Method::GET {
+        return deny(405);
+    }
+    // convertFileSrc percent-encodes the whole path into the URL path segment.
+    let Ok(requested) =
+        percent_encoding::percent_decode_str(request.uri().path().trim_start_matches('/'))
+            .decode_utf8()
+    else {
+        return deny(400);
+    };
+    let Ok(canonical) = std::fs::canonicalize(PathBuf::from(requested.as_ref())) else {
+        return deny(404);
+    };
+    let allowed = app
+        .try_state::<Watched>()
+        .and_then(|watched| {
+            watched
+                .0
+                .lock()
+                .ok()
+                .map(|state| state.allowed.contains(&canonical))
+        })
+        .unwrap_or(false);
+    if !allowed {
+        return deny(404);
+    }
+    let Ok(bytes) = std::fs::read(&canonical) else {
+        return deny(404);
+    };
+    http::Response::builder()
+        .status(200)
+        .header("Content-Type", mime_for(&canonical))
+        .header("Content-Length", bytes.len().to_string())
+        .header("Cache-Control", "no-store")
+        // PDF.js fetches these bytes from the app origin; without this header
+        // the cross-origin fetch to doc.localhost is blocked by the webview.
+        .header("Access-Control-Allow-Origin", "*")
+        .body(bytes)
+        .expect("document response")
 }
 
 /// How much bigger the whole window is than its content, in logical pixels.
@@ -289,10 +496,10 @@ fn set_poll_seconds(seconds: u64) {
     POLL_SECONDS.store(seconds.min(60), Ordering::Relaxed);
 }
 
-/// Fill the left half of the usable screen — the other half is where your
-/// editor lives.
+/// Fill half of the usable screen — the other half is where your editor
+/// lives. `edge` names the half: left, right, top or bottom.
 #[tauri::command]
-fn snap_left(window: tauri::Window) -> Result<(), String> {
+fn snap(window: tauri::Window, edge: String) -> Result<(), String> {
     let monitor = window
         .current_monitor()
         .map_err(|error| error.to_string())?
@@ -303,16 +510,45 @@ fn snap_left(window: tauri::Window) -> Result<(), String> {
     let frame_width = (frame_width * scale).round() as u32;
     let frame_height = (frame_height * scale).round() as u32;
 
-    window
-        .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+    let half_width = area.size.width / 2;
+    let half_height = area.size.height / 2;
+    let (x, y, width, height) = match edge.as_str() {
+        "left" => (
             area.position.x,
             area.position.y,
+            half_width,
+            area.size.height,
+        ),
+        "right" => (
+            area.position.x + half_width as i32,
+            area.position.y,
+            half_width,
+            area.size.height,
+        ),
+        "top" => (
+            area.position.x,
+            area.position.y,
+            area.size.width,
+            half_height,
+        ),
+        "bottom" => (
+            area.position.x,
+            area.position.y + half_height as i32,
+            area.size.width,
+            half_height,
+        ),
+        _ => return Err(format!("unknown dock edge: {edge}")),
+    };
+
+    window
+        .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            x, y,
         )))
         .map_err(|error| error.to_string())?;
     window
         .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-            (area.size.width / 2).saturating_sub(frame_width),
-            area.size.height.saturating_sub(frame_height),
+            width.saturating_sub(frame_width),
+            height.saturating_sub(frame_height),
         )))
         .map_err(|error| error.to_string())
 }
@@ -338,7 +574,9 @@ async fn pick_file(app: AppHandle) -> Option<String> {
         .file()
         .add_filter(
             "Documents and images",
-            &["pdf", "png", "jpg", "jpeg", "webp", "avif"],
+            &[
+                "pdf", "md", "markdown", "png", "jpg", "jpeg", "webp", "avif",
+            ],
         )
         .blocking_pick_file()
         .map(|file| file.to_string())
@@ -409,56 +647,200 @@ fn spawn_watcher(app: AppHandle) {
 #[derive(Clone, Default, Serialize)]
 struct Launch {
     mode: Option<String>,
-    dock: bool,
+    /// Which screen half to fill, if any: left, right, top or bottom.
+    dock: Option<String>,
     poll: Option<u64>,
     /// Everything after the first file, for the frontend to open as tabs. The
     /// first one is adopted here, because it is what the watcher follows.
     rest: Vec<String>,
+    /// This build, for the update check: the version it compares against and
+    /// the platform whose installer it should offer.
+    version: String,
+    platform: String,
+}
+
+/// Open a release download in the default browser.
+///
+/// The URL comes from the webview, and "open any URL" is exactly the kind of
+/// primitive an injected script would love — so only the project's own
+/// releases pass, and nothing else is openable from the frontend.
+#[tauri::command]
+fn open_download(url: String) -> Result<(), String> {
+    const RELEASES: &str = "https://github.com/ricardofrantz/pdf-next/releases/";
+    if !url.starts_with(RELEASES)
+        || url.contains("..")
+        || url.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err("not a pdf-next release".into());
+    }
+    open::that_detached(&url).map_err(|error| error.to_string())
+}
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const USAGE: &str = "\
+usage: pdf-next [files...] [flags]
+
+  pdf-next paper.pdf --night --left        dark pages, filling the left half
+  pdf-next NOTES.md --sepia --poll 3       markdown as warm paper, checked every 3s
+  pdf-next paper.pdf supp.pdf fig1.png     three tabs, the first one showing
+
+files   .pdf  .png .jpg .jpeg .webp .avif .gif .bmp  .md .markdown
+        If pdf-next is already running, the files open there as new tabs and
+        this command returns at once. Each file opened is printed on stdout.
+
+flags
+  --left, --right, --top, --bottom   dock to that half of the screen
+  --night, --sepia, --invert, --plain
+                                     page appearance for this window only
+  --mode <night|sepia|invert|clear>  the same, by name
+  --poll <seconds>                   watch interval; 0 turns watching off
+  --wait                             stay attached to the terminal until the
+                                     window closes (macOS and Linux; by default
+                                     pdf-next returns as soon as it has launched)
+  -h, --help                         this text
+  -V, --version                      the version
+
+exit status: 0 launched or already running, 1 a file was not found,
+             2 the command line could not be understood.
+";
+
+/// What the command line asked for.
+enum Cli {
+    Help,
+    Version,
+    Run(Invocation),
+}
+
+/// A launch: files to open (the first is the one the watcher follows), how the
+/// window should come up, and whether to hold the terminal.
+#[derive(Default)]
+struct Invocation {
+    files: Vec<PathBuf>,
+    launch: Launch,
+    wait: bool,
 }
 
 /// `pdf-next paper.pdf figure.png --night --left --poll 2`
 ///
-/// Flags are deliberately few: appearance, docking, and the watch interval —
-/// the three things you would otherwise have to click after every launch.
-/// Several files open as tabs, with the first one showing.
-fn parse_arguments() -> (Option<PathBuf>, Launch) {
-    let mut launch = Launch::default();
-    let mut path = None;
-    let mut args = std::env::args_os().skip(1).peekable();
+/// Flags are deliberately few: appearance, docking, the watch interval and
+/// `--wait` — the things you would otherwise have to click after every launch.
+/// Anything else is answered, never swallowed: a program calling this must be
+/// able to learn the contract from `--help`, and a mistyped path must fail
+/// with an exit status instead of a blank window. `Err` carries that status
+/// and a message for stderr. Relative paths resolve against `cwd`, because a
+/// second instance forwards its arguments to a process with a different one.
+fn parse_cli<I>(arguments: I, cwd: Option<&Path>) -> Result<Cli, (i32, String)>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let mut invocation = Invocation::default();
+    let mut arguments = arguments.into_iter();
 
-    while let Some(argument) = args.next() {
+    while let Some(argument) = arguments.next() {
         let text = argument.to_string_lossy().to_string();
         match text.as_str() {
-            "--left" | "--dock" | "--dock-left" => launch.dock = true,
-            "--night" | "--dark" => launch.mode = Some("night".into()),
-            "--sepia" | "--reader" => launch.mode = Some("sepia".into()),
-            "--invert" => launch.mode = Some("invert".into()),
-            "--plain" | "--light" => launch.mode = Some("clear".into()),
-            "--mode" => {
-                if let Some(value) = args.next() {
-                    launch.mode = Some(value.to_string_lossy().to_string());
-                }
+            "-h" | "--help" => return Ok(Cli::Help),
+            "-V" | "--version" => return Ok(Cli::Version),
+            "--wait" | "--foreground" => invocation.wait = true,
+            "--left" | "--dock" | "--dock-left" => invocation.launch.dock = Some("left".into()),
+            "--right" | "--dock-right" => invocation.launch.dock = Some("right".into()),
+            "--top" | "--up" | "--dock-top" => invocation.launch.dock = Some("top".into()),
+            "--bottom" | "--down" | "--dock-bottom" => {
+                invocation.launch.dock = Some("bottom".into())
             }
-            "--poll" => {
-                if let Some(value) = args.next() {
-                    launch.poll = value.to_string_lossy().parse().ok();
+            "--night" | "--dark" => invocation.launch.mode = Some("night".into()),
+            "--sepia" | "--reader" => invocation.launch.mode = Some("sepia".into()),
+            "--invert" => invocation.launch.mode = Some("invert".into()),
+            "--plain" | "--light" => invocation.launch.mode = Some("clear".into()),
+            "--mode" => match arguments.next() {
+                Some(value) => invocation.launch.mode = Some(value.to_string_lossy().to_string()),
+                None => {
+                    return Err((
+                        2,
+                        "--mode needs a name: night, sepia, invert or clear".into(),
+                    ))
                 }
+            },
+            "--poll" => match arguments
+                .next()
+                .and_then(|v| v.to_string_lossy().parse().ok())
+            {
+                Some(seconds) => invocation.launch.poll = Some(seconds),
+                None => return Err((2, "--poll needs a whole number of seconds".into())),
+            },
+            // macOS used to pass a process serial number to launched apps.
+            _ if text.starts_with("-psn_") => {}
+            _ if text.starts_with('-') && text.len() > 1 => {
+                return Err((2, format!("unknown flag {text} (try --help)")));
             }
             _ => {
-                let candidate = PathBuf::from(&argument);
-                if !candidate.exists() {
-                    continue;
+                let given = PathBuf::from(&argument);
+                let candidate = match (given.is_absolute(), cwd) {
+                    (false, Some(cwd)) => cwd.join(&given),
+                    _ => given,
+                };
+                if !candidate.is_file() {
+                    return Err((1, format!("no such file: {text}")));
                 }
-                if path.is_none() {
-                    path = Some(candidate);
-                } else {
-                    launch.rest.push(candidate.to_string_lossy().to_string());
-                }
+                invocation.files.push(candidate);
             }
         }
     }
 
-    (path, launch)
+    Ok(Cli::Run(invocation))
+}
+
+/// Was this process started by LaunchServices — Finder, the Dock, `open`?
+/// Then the file comes as an Apple Event to *this* process and it must stay
+/// alive to receive it. Terminal.app also sets this variable, to its own
+/// identifier, and shells inherit it — hence the exact comparison.
+#[cfg(target_os = "macos")]
+fn launched_by_launch_services(identifier: &str) -> bool {
+    std::env::var("__CFBundleIdentifier").as_deref() == Ok(identifier)
+}
+
+/// A viewer launched from a command line should hand the prompt back, like
+/// `code` or `open` do — a script (or an agent) that opens a PDF must not be
+/// held hostage until someone closes the window, and a shell tool's timeout
+/// must not take the window down with it. Re-run ourselves detached, in a
+/// process group of our own, and let this process exit. `--wait` opts out;
+/// debug builds never detach, because `tauri dev` is watching this process.
+#[cfg(unix)]
+fn detach(arguments: &[std::ffi::OsString]) -> bool {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let Ok(executable) = std::env::current_exe() else {
+        return false;
+    };
+    Command::new(executable)
+        .args(arguments)
+        .arg("--wait")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .is_ok()
+}
+
+/// The release binary is a Windows GUI executable: no console of its own, so
+/// nothing it prints goes anywhere. If it was started from one, borrow it, so
+/// `--help` and `opened …` reach the person (or program) that typed them.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
+    };
+    // SAFETY: plain Win32 calls with no pointers. Only attach when stdout is
+    // not already something — a pipe or file the caller redirected to must be
+    // left alone, and attaching would replace it with the console.
+    unsafe {
+        if GetStdHandle(STD_OUTPUT_HANDLE).is_null() {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
 }
 
 #[tauri::command]
@@ -488,13 +870,85 @@ fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 }
 
 fn main() {
+    #[cfg(windows)]
+    attach_console();
+
+    // The command line is answered before any window exists, so `--help`,
+    // `--version` and a mistyped path cost nothing and block nothing.
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let cwd = std::env::current_dir().ok();
+    let invocation = match parse_cli(arguments.iter().cloned(), cwd.as_deref()) {
+        Ok(Cli::Help) => {
+            print!("pdf-next {VERSION} — tiny PDF, image and markdown viewer with live reload\n\n{USAGE}");
+            return;
+        }
+        Ok(Cli::Version) => {
+            println!("pdf-next {VERSION}");
+            return;
+        }
+        Ok(Cli::Run(invocation)) => invocation,
+        Err((status, message)) => {
+            eprintln!("pdf-next: {message}");
+            std::process::exit(status);
+        }
+    };
+
+    // Say what happened, in canonical form, so a caller can verify rather
+    // than assume. Printed once, by the process the caller ran.
+    for file in &invocation.files {
+        let shown = std::fs::canonicalize(file).unwrap_or_else(|_| file.clone());
+        let shown = shown.to_string_lossy();
+        // Windows canonical paths carry a `\\?\` prefix no person types.
+        println!("opened {}", shown.strip_prefix(r"\\?\").unwrap_or(&shown));
+    }
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    let context = tauri::generate_context!();
+
+    #[cfg(unix)]
+    {
+        #[cfg(target_os = "macos")]
+        let must_stay = launched_by_launch_services(&context.config().identifier);
+        #[cfg(not(target_os = "macos"))]
+        let must_stay = false;
+        if !invocation.wait && !cfg!(debug_assertions) && !must_stay && detach(&arguments) {
+            return;
+        }
+    }
+
+    let Invocation {
+        files, mut launch, ..
+    } = invocation;
+    let mut files = files.into_iter();
+    let first = files.next();
+    launch.rest = files
+        .map(|path| path.to_string_lossy().to_string())
+        .collect();
+    launch.version = VERSION.to_string();
+    launch.platform = std::env::consts::OS.to_string();
+
     tauri::Builder::default()
+        // Must be the first plugin: a second launch hands its files to the
+        // running window and exits before anything else initializes.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            let cwd = PathBuf::from(cwd);
+            let arguments = argv.into_iter().skip(1).map(std::ffi::OsString::from);
+            let files = match parse_cli(arguments, Some(&cwd)) {
+                Ok(Cli::Run(invocation)) => invocation.files,
+                _ => Vec::new(),
+            };
+            deliver(app, files);
+        }))
         .plugin(navigation_guard())
         .plugin(tauri_plugin_dialog::init())
         .manage(Watched::default())
+        .register_uri_scheme_protocol("doc", |ctx, request| {
+            serve_document(ctx.app_handle(), &request)
+        })
         .invoke_handler(tauri::generate_handler![
             open_path,
             initial_file,
+            pending_files,
             pick_file,
             os_theme,
             fit_window,
@@ -502,16 +956,17 @@ fn main() {
             set_poll_seconds,
             launch_options,
             siblings,
-            snap_left
+            read_markdown,
+            snap,
+            open_download
         ])
-        .setup(|app| {
-            let (path, launch) = parse_arguments();
+        .setup(move |app| {
             if let Some(seconds) = launch.poll {
                 POLL_SECONDS.store(seconds.min(60), Ordering::Relaxed);
             }
             app.manage(launch);
-            if let Some(path) = path {
-                let _ = adopt(app.handle(), &app.state::<Watched>(), path);
+            if let Some(path) = first {
+                let _ = adopt(&app.state::<Watched>(), path);
             }
             if let Some(window) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
@@ -524,6 +979,107 @@ fn main() {
             spawn_watcher(app.handle().clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("failed to start pdf-next");
+        .build(context)
+        .expect("failed to start pdf-next")
+        .run(|app, event| {
+            // macOS delivers files opened from Finder, the Dock or `open -a`
+            // as an Apple Event, not as arguments; without this arm a
+            // double-clicked PDF opens an empty window.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                let files = urls
+                    .iter()
+                    .filter_map(|url| url.to_file_path().ok())
+                    .collect();
+                deliver(app, files);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{open_download, parse_cli, render_markdown, Cli};
+    use std::ffi::OsString;
+
+    fn cli(words: &[&str]) -> Result<Cli, (i32, String)> {
+        parse_cli(words.iter().map(OsString::from), None)
+    }
+
+    #[test]
+    fn help_and_version_are_answered_not_swallowed() {
+        assert!(matches!(cli(&["--help"]), Ok(Cli::Help)));
+        assert!(matches!(cli(&["-h"]), Ok(Cli::Help)));
+        assert!(matches!(cli(&["--version"]), Ok(Cli::Version)));
+        assert!(matches!(cli(&["-V"]), Ok(Cli::Version)));
+    }
+
+    #[test]
+    fn mistakes_have_exit_codes() {
+        assert_eq!(cli(&["--nope"]).err().map(|e| e.0), Some(2));
+        assert_eq!(cli(&["--poll", "soon"]).err().map(|e| e.0), Some(2));
+        assert_eq!(cli(&["--mode"]).err().map(|e| e.0), Some(2));
+        let missing = cli(&["definitely-not-here.pdf"]).err().unwrap();
+        assert_eq!(missing.0, 1);
+        assert!(missing.1.contains("definitely-not-here.pdf"));
+    }
+
+    #[test]
+    fn files_resolve_against_the_callers_directory() {
+        let dir = std::env::temp_dir().join(format!("pdf-next-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.pdf"), b"%PDF-1.7\n%%EOF\n").unwrap();
+        std::fs::write(dir.join("b.md"), b"# hi\n").unwrap();
+
+        let parsed = parse_cli(
+            ["a.pdf", "--night", "b.md", "--wait", "-psn_0_1"].map(OsString::from),
+            Some(&dir),
+        );
+        let Ok(Cli::Run(invocation)) = parsed else {
+            panic!("expected a run");
+        };
+        assert_eq!(invocation.files, vec![dir.join("a.pdf"), dir.join("b.md")]);
+        assert_eq!(invocation.launch.mode.as_deref(), Some("night"));
+        assert!(invocation.wait);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hostile_markdown_is_inert() {
+        let html = render_markdown(
+            "# Hi\n\n<script>alert(1)</script>\n\n<img src=x onerror=alert(1)>\n\n\
+             [link](javascript:alert(1))\n\n<p onclick=\"alert(1)\">text</p>",
+        );
+        assert!(html.contains("<h1>"));
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("<img"));
+        assert!(!html.contains("javascript:"));
+        assert!(!html.contains("onclick"));
+        assert!(!html.contains("onerror"));
+    }
+
+    #[test]
+    fn github_extras_render() {
+        let html = render_markdown(
+            "| a | b |\n| - | - |\n| 1 | 2 |\n\n- [x] done\n- [ ] not yet\n\n~~gone~~",
+        );
+        assert!(html.contains("<table>"));
+        assert!(html.contains("checkbox"));
+        assert!(html.contains("<del>"));
+    }
+    #[test]
+    fn only_pdf_next_releases_are_openable() {
+        // The success path is deliberately untested: it would open a browser.
+        for url in [
+            "https://github.com/someone-else/pdf-next/releases/download/v1/x.exe",
+            "https://evil.example/pdf-next/releases/x.exe",
+            "https://github.com/ricardofrantz/pdf-next/releases/../../settings",
+            "https://github.com/ricardofrantz/pdf-next/releases/x.exe --flag",
+            "file:///etc/passwd",
+        ] {
+            assert!(open_download(url.into()).is_err(), "{url} must be refused");
+        }
+    }
 }

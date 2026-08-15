@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "pdf-next",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "identifier": "dev.frantz.pdf-next",
   "build": {
     "frontendDist": "../src"
@@ -20,21 +20,15 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' asset: http://asset.localhost blob: data:; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-      "assetProtocol": {
-        "enable": true,
-        "scope": {
-          "allow": []
-        }
-      }
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' doc: http://doc.localhost blob: data:; connect-src 'self' ipc: http://ipc.localhost doc: http://doc.localhost https://api.github.com; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
     "category": "Productivity",
-    "shortDescription": "Tiny PDF and PNG viewer with one-second live reload",
-    "longDescription": "pdf-next opens PDFs and images, follows your system dark mode, searches text, and reloads within a second of the file changing on disk — built for the LaTeX and Typst compile loop.",
+    "shortDescription": "Tiny PDF, image and markdown viewer with one-second live reload",
+    "longDescription": "pdf-next opens PDFs, images and markdown, follows your system dark mode, searches text, and reloads within a second of the file changing on disk — built for the LaTeX, Typst and markdown compile loop.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -53,6 +47,12 @@
         "ext": ["png", "jpg", "jpeg", "webp", "avif"],
         "name": "Image",
         "description": "Image file",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["md", "markdown"],
+        "name": "Markdown document",
+        "description": "Markdown document",
         "role": "Viewer"
       }
     ],

@@ -1,8 +1,8 @@
 # pdf-next
 
-A small, fast PDF and image viewer that **reloads the moment the file changes** — built for
-the LaTeX and Typst compile loop, where you rebuild and want to see the result without
-touching anything.
+A small, fast PDF, image and markdown viewer that **reloads the moment the file changes** —
+built for the LaTeX and Typst compile loop, where you rebuild and want to see the result
+without touching anything.
 
 [![CI](https://github.com/ricardofrantz/pdf-next/actions/workflows/ci.yml/badge.svg)](https://github.com/ricardofrantz/pdf-next/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
@@ -31,11 +31,13 @@ that survives a build deleting and recreating the file mid-compile.
 - **Remembers the window size per file.** Resize while reading a paper and reopening it later
   gives you that window back. Stored with the app's preferences, capped at the 80 most recent
   files, so there is no cache to manage.
-- **Dock to the left half** with `Ctrl+Shift+←` or the toolbar button, so the PDF takes the left
-  half of the screen and your editor keeps the right. It switches to fit-width, because fitting
-  a whole page into a tall narrow column just shrinks the text. Press it again to undock: the
-  window returns to the size of the page and the zoom returns to fit-page. Your place in the
-  document survives both moves.
+- **Dock to any half of the screen** — five toolbar buttons, or `Ctrl+Shift+←` / `→` / `↑` /
+  `↓`, fill the left, right, top or bottom half, so the document takes one half and your
+  editor keeps the other. A tall half switches to fit-width, because fitting a whole page into
+  a narrow column just shrinks the text; a short half fits the page. The center button (or
+  `Ctrl+Shift+Enter`, or pressing the same edge again) undocks: the window returns to the size
+  of the page, centred, and the zoom returns to fit-page. Your place in the document survives
+  every move.
 - **Fit the window to the content** with `Ctrl+Shift+F` or the toolbar button — the other
   direction from everything above. Set a figure to the size you want it and the window comes to
   the picture: no padding, no border of background, the frame exactly on the edges. It stays on,
@@ -51,15 +53,30 @@ that survives a build deleting and recreating the file mid-compile.
   through every image next to it, in reading order — `fig2` before `fig10`, not after it. The
   toolbar shows your position, and the window stays where it is instead of resizing on every
   press.
-- **PDF and images.** `.pdf`, plus `.png`, `.jpg`, `.webp` and `.avif`. Images zoom too, with the
-  same control and keys as a PDF.
+- **PDF, images and markdown.** `.pdf`, plus `.png`, `.jpg`, `.webp` and `.avif`, plus `.md`.
+  Images zoom too, with the same control and keys as a PDF.
+- **Markdown, rendered or raw.** A `.md` opens as a typeset reading column — GitHub-style
+  tables, task lists, footnotes and strikethrough included — parsed by
+  [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) in Rust and sanitized by
+  [ammonia](https://github.com/rust-ammonia/ammonia) before the HTML ever reaches the window,
+  so a hostile file cannot script anything. `Ctrl+U` (or the toolbar button) flips to the raw
+  text and back; zoom reflows the text rather than scaling a bitmap. Edit the file and the
+  view reloads within a second, keeping your scroll position — the same watch loop as PDFs.
+  Local images referenced by the file are deliberately not loaded: the viewer reads exactly
+  the files you opened, nothing next to them.
 - **Follows your system dark mode**, and can recolour PDF pages themselves. The mode button
   cycles Clear → Night → Invert → Sepia, so plain white pages are always one press away;
   Shift+click it to jump straight back to Clear from anywhere.
 - **Text search** with match counts, powered by PDF.js.
+- **Check for updates, when you ask.** The last toolbar button asks GitHub for the latest
+  release; if it is newer, the button becomes the download and a second press fetches the
+  installer for your system — `.exe`, `.dmg` or `.AppImage` — in your browser, from the
+  repo's own Releases page. Nothing runs on its own: the app never touches the network unless
+  you press it, and this is the only host it can reach.
 - **Keyboard first:** `j`/`k` scroll, `n`/`p` pages, `g`/`G` first and last, `+`/`-` zoom,
   `←`/`→` tabs (or folder, with one file open), `Ctrl+W` close, `Ctrl+F` find, `Ctrl+R` reload,
-  `Ctrl+O` open, `Ctrl+Shift+F` fit window to content, `Ctrl+Shift+←` dock left.
+  `Ctrl+O` open, `Ctrl+U` raw markdown, `Ctrl+Shift+F` fit window to content,
+  `Ctrl+Shift+←`/`→`/`↑`/`↓` dock to a screen half, `Ctrl+Shift+Enter` undock.
 
 ## Install
 
@@ -84,20 +101,60 @@ pdf-next paper.pdf
 pdf-next paper.pdf --night --left        # dark pages, filling the left half
 pdf-next figure.png --invert             # inverted, for a white-background plot
 pdf-next thesis.pdf --sepia --poll 3     # warm paper, check for rebuilds every 3s
+pdf-next NOTES.md --sepia                # markdown as warm paper, reloading as you write
 pdf-next paper.pdf supp.pdf fig1.png     # three tabs, the first one showing
 ```
 
 | Flag | Effect |
 | ---- | ------ |
 | `--left` | Dock to the left half of the screen (implies fit-width). |
+| `--right` | Dock to the right half (implies fit-width). |
+| `--top` / `--bottom` | Dock to the top or bottom half (implies fit-page). |
 | `--night` / `--dark` | Dark pages, light text. |
 | `--sepia` / `--reader` | Warm paper. |
 | `--invert` | Invert the page, for scans and white-background figures. |
 | `--plain` / `--light` | Original page colors. |
 | `--mode <name>` | Same as the above, by name. |
 | `--poll <seconds>` | Watch interval; `0` turns watching off. |
+| `--wait` | Stay attached to the terminal until the window closes (macOS and Linux — see below). |
+| `--help`, `--version` | Print and exit. |
 
 Appearance flags style that window only — they do not change your saved default.
+
+Run it again with another file while it is open and the file joins the running window as
+a new tab — the second command returns at once instead of opening a second viewer.
+
+### From scripts and agents
+
+pdf-next behaves like a command-line tool, so a script — or a coding agent — can call it
+without guessing:
+
+```bash
+pdf-next report.pdf            # prints "opened /abs/path/report.pdf" and returns at once
+pdf-next --help                # usage, exit 0
+pdf-next missing.pdf           # "pdf-next: no such file: missing.pdf", exit 1
+pdf-next --bogus               # "unknown flag --bogus (try --help)", exit 2
+```
+
+Exit status is `0` when the file was launched or handed to the running window, `1` for a
+file that does not exist, `2` for a command line it could not understand. Relative paths
+resolve against the caller's directory, including when they are forwarded to a running
+instance. On macOS and Linux the launched process detaches by default (own process group,
+so a shell tool's timeout cannot take the window down); pass `--wait` to hold the terminal,
+as a compile loop might want. On Windows a GUI executable never holds the console.
+
+macOS: a `.app` is not on your `PATH`. Either use the standard idiom — `open -a pdf-next
+report.pdf` — which delivers the file to the app (or the running window) the way Finder does,
+or make a one-line shim once:
+
+```bash
+printf '#!/bin/sh\nexec /Applications/pdf-next.app/Contents/MacOS/pdf-next "$@"\n' \
+  > /usr/local/bin/pdf-next && chmod +x /usr/local/bin/pdf-next
+```
+
+Then `which pdf-next`, `pdf-next --help` and `pdf-next report.pdf` all work as above. If your
+agent has a project instructions file, one line — *"open PDFs with `pdf-next <file>`; use
+`open -a pdf-next` on macOS if the shim is missing"* — saves it rediscovering this each time.
 
 ## Security
 
@@ -110,8 +167,19 @@ every byte of it.
   *local* origin, which Tauri trusts with IPC. A navigation guard now rejects anything that is
   not the app's own origin, and external links in documents are inert (internal ones, like a
   table of contents, still work).
-- **The webview can read exactly one file**: the one you opened. The asset scope starts empty and
-  the opened document is allowed at runtime, so even injected script has no filesystem reach.
+- **The webview can read exactly the files you opened.** Document bytes are served by a
+  purpose-built `doc://` protocol whose handler checks every request against the set of files
+  you opened this session — an allowlist in our own Rust code, populated only by the open
+  path. Even injected script has no reach beyond that.
+- **Markdown is sanitized before it exists as HTML.** A `.md` is parsed and scrubbed by
+  ammonia on the Rust side; scripts, event handlers and `javascript:` URLs never cross into
+  the window, images are stripped so a file cannot probe your disk, and the CSP forbids
+  inline script besides.
+- **One network host, on request only.** The CSP names `api.github.com` and nothing else, so
+  the update check can ask for the latest release when you press the button — and an injected
+  script has nowhere else to talk to. The download itself is opened in your browser through a
+  Rust command that accepts only URLs under this project's Releases; the webview cannot ask
+  the OS to open anything else.
 - **Two permissions total** — listen and unlisten for events. Everything else, including path
   resolution and the file dialog, is driven from Rust where the frontend cannot reach it.
 - No `eval`, no WASM execution, no plugins, no framing, and PDF scripting is off, so a document
@@ -145,11 +213,12 @@ document is torn down, one worker is shared for the life of the process instead 
 per reload, page views free their canvases instead of waiting for the collector, and reloads are
 skipped entirely while the window is hidden.
 
-What remains scales with the document, not with the number of reloads: a 1.2 KB PDF reloaded 20
-times grows by **nothing at all**, while a 2.2 MB paper grows ~10 MB per reload and gives much of
-it back when idle. That points at the webview caching each cache-busted URL; serving the document
-from a purpose-built protocol with `Cache-Control: no-store` is the next step, and would let the
-asset protocol be dropped entirely.
+What remains scales with the document, not with the number of reloads. The ~10 MB-per-reload
+growth that used to point at the webview caching each cache-busted URL is gone: documents are
+served from a purpose-built `doc://` protocol with `Cache-Control: no-store`, so no revision
+ever enters the HTTP cache, and the asset protocol has been dropped entirely. On top of that,
+hiding the window now also releases the PDF.js font and image caches (they rebuild lazily when
+you come back), and a background tab holds neither a decoded image nor a rendered markdown DOM.
 
 ## Building
 

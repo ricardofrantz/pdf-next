@@ -43,6 +43,29 @@
         <rect x="1.5" y="3.5" width="6" height="9" rx="1" fill="currentColor"/>
         <rect x="8.9" y="3.5" width="5.6" height="9" rx="1" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2 1.6"/>
       </symbol>
+      <symbol id="i-dock-right" viewBox="0 0 16 16" fill="none">
+        <rect x="8.5" y="3.5" width="6" height="9" rx="1" fill="currentColor"/>
+        <rect x="1.5" y="3.5" width="5.6" height="9" rx="1" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2 1.6"/>
+      </symbol>
+      <symbol id="i-dock-top" viewBox="0 0 16 16" fill="none">
+        <rect x="3.5" y="1.5" width="9" height="6" rx="1" fill="currentColor"/>
+        <rect x="3.5" y="8.9" width="9" height="5.6" rx="1" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2 1.6"/>
+      </symbol>
+      <symbol id="i-dock-bottom" viewBox="0 0 16 16" fill="none">
+        <rect x="3.5" y="8.5" width="9" height="6" rx="1" fill="currentColor"/>
+        <rect x="3.5" y="1.5" width="9" height="5.6" rx="1" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2 1.6"/>
+      </symbol>
+      <symbol id="i-dock-center" viewBox="0 0 16 16" fill="none">
+        <rect x="1.5" y="2.5" width="13" height="11" rx="1" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2 1.6"/>
+        <rect x="5.2" y="5.6" width="5.6" height="4.8" rx="0.6" fill="currentColor"/>
+      </symbol>
+      <symbol id="i-raw" viewBox="0 0 16 16" fill="none">
+        <path d="M5.5 4.5L2 8L5.5 11.5M10.5 4.5L14 8L10.5 11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-update" viewBox="0 0 16 16" fill="none">
+        <path d="M8 2.5V10M8 10L5 7M8 10L11 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M2.5 10.5V12.5C2.5 13.05 2.95 13.5 3.5 13.5H12.5C13.05 13.5 13.5 13.05 13.5 12.5V10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </symbol>
       <symbol id="i-close" viewBox="0 0 16 16" fill="none">
         <path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
       </symbol>
@@ -105,15 +128,32 @@
         <button id="findToggle" type="button" class="pdf-only" title="Find (Ctrl+F)" aria-label="Find in document">
           <svg class="icon"><use href="#i-find"/></svg>
         </button>
+        <button id="raw" type="button" class="md-only" title="Show the raw markdown (Ctrl+U)" aria-label="Show the raw markdown" aria-pressed="false">
+          <svg class="icon"><use href="#i-raw"/></svg>
+        </button>
         <button id="mode" type="button" title="Page mode (Shift+click to clear)" aria-label="Page mode" aria-pressed="false">
           <svg class="icon"><use href="#i-mode"/></svg>
         </button>
         <button id="wrap" type="button" title="Fit the window to the content (Ctrl+Shift+F)" aria-label="Fit the window to the content" aria-pressed="false">
           <svg class="icon"><use href="#i-wrap"/></svg>
         </button>
-        <button id="dock" type="button" title="Fill the left half of the screen (Ctrl+Shift+Left)" aria-label="Fill the left half of the screen" aria-pressed="false">
-          <svg class="icon"><use href="#i-dock-left"/></svg>
-        </button>
+        <span class="group" id="dockGroup" role="group" aria-label="Dock the window">
+          <button id="dockLeft" type="button" title="Fill the left half of the screen (Ctrl+Shift+Left)" aria-label="Fill the left half of the screen" aria-pressed="false">
+            <svg class="icon"><use href="#i-dock-left"/></svg>
+          </button>
+          <button id="dockTop" type="button" title="Fill the top half of the screen (Ctrl+Shift+Up)" aria-label="Fill the top half of the screen" aria-pressed="false">
+            <svg class="icon"><use href="#i-dock-top"/></svg>
+          </button>
+          <button id="dockCenter" type="button" title="Center and fit the window to the page (Ctrl+Shift+Enter)" aria-label="Center and fit the window to the page">
+            <svg class="icon"><use href="#i-dock-center"/></svg>
+          </button>
+          <button id="dockBottom" type="button" title="Fill the bottom half of the screen (Ctrl+Shift+Down)" aria-label="Fill the bottom half of the screen" aria-pressed="false">
+            <svg class="icon"><use href="#i-dock-bottom"/></svg>
+          </button>
+          <button id="dockRight" type="button" title="Fill the right half of the screen (Ctrl+Shift+Right)" aria-label="Fill the right half of the screen" aria-pressed="false">
+            <svg class="icon"><use href="#i-dock-right"/></svg>
+          </button>
+        </span>
         <select id="poll" title="Check the file for changes every…" aria-label="Auto reload interval">
           <option value="1">1s</option>
           <option value="2">2s</option>
@@ -123,6 +163,9 @@
         <span id="waiting" title="The file is being rebuilt" hidden>
           <span class="dot"></span>
         </span>
+        <button id="update" type="button" title="Check for updates" aria-label="Check for updates">
+          <svg class="icon"><use href="#i-update"/></svg>
+        </button>
       </div>
     </header>
 
@@ -134,6 +177,10 @@
       </div>
       <div id="imageStage" hidden>
         <img id="image" alt="" />
+      </div>
+      <div id="markdownStage">
+        <article id="markdown"></article>
+        <pre id="markdownRaw" hidden></pre>
       </div>
 
       <div id="find" hidden>
@@ -155,7 +202,7 @@
           <rect x="9" y="5.5" width="30" height="37" rx="3" stroke="currentColor" stroke-width="2" stroke-dasharray="5 4"/>
           <path d="M24 16v14m0 0-5.5-5.5M24 30l5.5-5.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        <p class="empty-title">Drop a PDF or image here</p>
+        <p class="empty-title">Drop a PDF, image or markdown file here</p>
         <p class="dim">or press <kbd>Ctrl</kbd>+<kbd>O</kbd> to browse</p>
       </div>
 

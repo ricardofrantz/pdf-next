@@ -1,7 +1,7 @@
 [package]
 name = "pdf-next"
-version = "0.5.1"
-description = "Tiny, fast PDF and PNG viewer that reloads when the file changes"
+version = "0.6.0"
+description = "Tiny, fast PDF, image and markdown viewer that reloads when the file changes"
 authors = ["Ricardo Frantz"]
 license = "MIT"
 repository = "https://github.com/ricardofrantz/pdf-next"
@@ -12,10 +12,26 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = "2"
 tauri-plugin-dialog = "2"
+# A second `pdf-next file.pdf` hands its files to the running window as tabs
+# and returns at once, instead of opening a second viewer.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Markdown is parsed and sanitized on this side of the IPC boundary: the
+# webview only ever sees HTML that ammonia has already scrubbed.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+ammonia = "4"
+percent-encoding = "2"
+# Hands a release download URL to the default browser — the one URL the
+# frontend may ask to open, and it is checked in Rust first.
+open = "5"
+
+# The release binary is a GUI-subsystem executable, which has no console of its
+# own; attaching to the parent's is what lets `--help` and `opened …` print.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
 # Small and fast beats fast-to-build: this binary is shipped, not iterated on.
 [profile.release]

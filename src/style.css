@@ -272,6 +272,28 @@ body:not(.has-file) #poll {
   background: var(--error);
 }
 
+/* The update button is quiet until a check has found something; then it wears
+   a dot and becomes the download. */
+#update {
+  position: relative;
+  color: var(--fg-dim);
+}
+
+#update.available {
+  color: var(--fg);
+}
+
+#update.available::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 /* ── Tabs ────────────────────────────────────────────────────────────── */
 /* One file is the normal case, and it should look exactly as it did before
    tabs existed — so the strip is not there at all until a second file opens. */
@@ -558,8 +580,187 @@ body:not(.kind-image) #imageStage {
 }
 
 body:not(.kind-pdf) .pdf-only,
-body:not(.kind-image) .image-only {
+body:not(.kind-image) .image-only,
+body:not(.kind-markdown) .md-only {
   display: none;
+}
+
+/* ── Markdown ────────────────────────────────────────────────────────── */
+/* The prose sits on a page, like a PDF does: white in every theme, recoloured
+   only by an explicit page mode. Tokens rather than rules per mode, so the
+   typography below is written once. */
+#markdownStage {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  padding: 20px 16px;
+  scrollbar-width: thin;
+
+  --md-bg: #ffffff;
+  --md-fg: #1f2328;
+  --md-dim: #59626b;
+  --md-rule: #d8dde3;
+  --md-code-bg: #f0f2f4;
+  --md-accent: #0b62c4;
+}
+
+body:not(.kind-markdown) #markdownStage {
+  display: none;
+}
+
+/* Inverting HTML text would just be night mode with extra steps, so both
+   modes share the night palette here. */
+body.mode-night #markdownStage,
+body.mode-invert #markdownStage {
+  --md-bg: #1b1b1b;
+  --md-fg: #d6d1c4;
+  --md-dim: #9a958a;
+  --md-rule: #3a3a3a;
+  --md-code-bg: #282828;
+  --md-accent: #6fb3f2;
+}
+
+body.mode-sepia #markdownStage {
+  --md-bg: #f4ecd8;
+  --md-fg: #5b4636;
+  --md-dim: #86735e;
+  --md-rule: #ddd0b5;
+  --md-code-bg: #ece2ca;
+  --md-accent: #8f5f2a;
+}
+
+#markdown,
+#markdownRaw {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 40px;
+  background: var(--md-bg);
+  color: var(--md-fg);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--fg) var(--page-ring), transparent),
+    0 2px 12px var(--shadow);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* The ID selectors above would otherwise beat the [hidden] UA rule. */
+#markdown[hidden],
+#markdownRaw[hidden] {
+  display: none;
+}
+
+#markdownRaw {
+  font: 12px/1.55 ui-monospace, "Cascadia Code", Consolas, "DejaVu Sans Mono", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#markdown {
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+#markdown > :first-child {
+  margin-top: 0;
+}
+
+#markdown > :last-child {
+  margin-bottom: 0;
+}
+
+#markdown h1,
+#markdown h2,
+#markdown h3,
+#markdown h4,
+#markdown h5,
+#markdown h6 {
+  margin: 1.4em 0 0.5em;
+  line-height: 1.25;
+}
+
+#markdown h1 {
+  font-size: 1.7em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--md-rule);
+}
+
+#markdown h2 {
+  font-size: 1.35em;
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid var(--md-rule);
+}
+
+#markdown h3 {
+  font-size: 1.15em;
+}
+
+#markdown a {
+  color: var(--md-accent);
+  text-decoration: none;
+}
+
+#markdown a:hover {
+  text-decoration: underline;
+}
+
+#markdown code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--md-code-bg);
+  font-family: ui-monospace, "Cascadia Code", Consolas, "DejaVu Sans Mono", monospace;
+  font-size: 0.88em;
+}
+
+#markdown pre {
+  padding: 12px 14px;
+  border-radius: 6px;
+  background: var(--md-code-bg);
+  overflow-x: auto;
+}
+
+#markdown pre code {
+  padding: 0;
+  background: none;
+  font-size: 0.86em;
+  line-height: 1.5;
+}
+
+#markdown blockquote {
+  margin: 0.8em 0;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid var(--md-rule);
+  color: var(--md-dim);
+}
+
+#markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+#markdown th,
+#markdown td {
+  padding: 5px 10px;
+  border: 1px solid var(--md-rule);
+}
+
+#markdown th {
+  background: var(--md-code-bg);
+}
+
+#markdown hr {
+  margin: 1.6em 0;
+  border: 0;
+  border-top: 1px solid var(--md-rule);
+}
+
+#markdown li + li {
+  margin-top: 0.2em;
+}
+
+#markdown input[type='checkbox'] {
+  margin-right: 6px;
 }
 
 #imageIndex {

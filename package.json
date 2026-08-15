@@ -1,8 +1,8 @@
 {
   "name": "pdf-next",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
-  "description": "Tiny, fast PDF and PNG viewer that reloads when the file changes",
+  "description": "Tiny, fast PDF, image and markdown viewer that reloads when the file changes",
   "license": "MIT",
   "scripts": {
     "dev": "tauri dev",

@@ -141,12 +141,12 @@ assert.match(
 );
 assert.match(
   app,
-  /async function toggleDock\(\)[\s\S]*?docking \? 'page-width' : 'page-fit'/,
-  'Docking must switch to fit-width and undocking back to fit-page.',
+  /async function dockTo\(edge\)[\s\S]*?\(edge === 'left' \|\| edge === 'right'\)\s*\? 'page-width'\s*: 'page-fit'/,
+  'A tall half must fit the width, a short half the page, and undocking fit-page.',
 );
 assert.match(
   app,
-  /async function toggleDock\(\)[\s\S]*?const auto = autoWindowSize\(\);[\s\S]*?await fitWindow\(auto\[0\], auto\[1\], true\)/,
+  /async function dockTo\(edge\)[\s\S]*?const auto = autoWindowSize\(\);[\s\S]*?await fitWindow\(auto\[0\], auto\[1\], true\)/,
   'Undocking must restore the automatic fit to the document.',
 );
 assert.match(
@@ -170,7 +170,7 @@ assert.match(
 );
 assert.match(
   app,
-  /async function toggleDock\(\)[\s\S]*?if \(state\.wrap\) \{[\s\S]*?setWrap\(false\)/,
+  /async function dockTo\(edge\)[\s\S]*?if \(state\.wrap\) \{[\s\S]*?setWrap\(false\)/,
   'Docking sets an explicit size; wrap must let go of the window first.',
 );
 assert.match(
@@ -224,20 +224,60 @@ assert.doesNotMatch(csp, /unsafe-eval/, 'CSP must not allow eval.');
 assert.match(csp, /worker-src 'self' blob:/, 'CSP must allow the PDF.js worker.');
 assert.match(csp, /object-src 'none'/, 'CSP must forbid plugins.');
 assert.match(csp, /base-uri 'none'/, 'CSP must forbid base-tag hijacking.');
+
+// Document bytes travel over the doc protocol, not the asset protocol. The
+// no-store header is what stops the webview cache growing ~10 MB per reload,
+// and the allowlist in our own handler is the whole filesystem boundary.
 assert.equal(
-  config.app?.security?.assetProtocol?.enable,
-  true,
-  'The asset protocol carries document bytes into the webview.',
+  config.app?.security?.assetProtocol,
+  undefined,
+  'The asset protocol is gone; the doc protocol replaced it.',
 );
-assert.deepEqual(
-  config.app?.security?.assetProtocol?.scope?.allow,
-  [],
-  'The asset scope must start empty; only the opened file is allowed, at runtime.',
+const cargo = await readFile('src-tauri/Cargo.toml', 'utf8');
+assert.doesNotMatch(
+  cargo,
+  /protocol-asset/,
+  'The protocol-asset feature must stay off; the doc protocol serves the bytes.',
+);
+assert.match(csp, /img-src[^;]*http:\/\/doc\.localhost/, 'CSP must allow doc images.');
+assert.match(csp, /connect-src[^;]*http:\/\/doc\.localhost/, 'CSP must allow doc fetches.');
+assert.match(
+  main,
+  /register_uri_scheme_protocol\("doc"/,
+  'The doc protocol must be registered.',
 );
 assert.match(
   main,
-  /fn adopt\([\s\S]*?asset_protocol_scope\(\)\.allow_file\(&canonical\)/,
+  /fn serve_document\([\s\S]*?state\.allowed\.contains\(&canonical\)[\s\S]*?"Cache-Control", "no-store"/,
+  'Every served document must pass the allowlist and carry no-store.',
+);
+assert.match(
+  main,
+  /fn adopt\([\s\S]*?state\.allowed\.insert\(canonical\.clone\(\)\)/,
   'Opening a file is what grants the webview permission to read exactly it.',
+);
+assert.match(
+  app,
+  /convertFileSrc\(file\.path, 'doc'\)/,
+  'Document URLs must go through the doc protocol.',
+);
+assert.match(
+  app,
+  /visibilityState === 'hidden'[\s\S]*?state\.document\?\.cleanup\(\)/,
+  'A hidden window must drop the PDF.js font and image caches.',
+);
+
+// Markdown crosses the IPC boundary as HTML, so it must be sanitized before
+// it leaves Rust, and images must not widen file access.
+assert.match(
+  main,
+  /fn render_markdown\([\s\S]*?builder\.rm_tags\(\["img"\]\)[\s\S]*?builder\.clean\(/,
+  'Markdown must be sanitized by ammonia with images stripped.',
+);
+assert.match(
+  main,
+  /fn read_markdown\([\s\S]*?state\.allowed\.contains\(&canonical\)/,
+  'read_markdown must serve only files the reader has opened.',
 );
 assert.match(
   main,
@@ -261,6 +301,88 @@ assert.deepEqual(
   capabilities.permissions,
   ['core:event:allow-listen', 'core:event:allow-unlisten'],
   'The webview needs events and nothing else; every other permission is reachable by injected script.',
+);
+
+// The command line is a contract for programs, not just people: it answers
+// --help, exits non-zero on mistakes, prints what it opened, hands a second
+// launch to the running window, and on macOS hears files opened from Finder.
+assert.match(
+  main,
+  /"-h" \| "--help" => return Ok\(Cli::Help\)[\s\S]*?"-V" \| "--version" => return Ok\(Cli::Version\)/,
+  '--help and --version must be answered, never treated as file names.',
+);
+assert.match(
+  main,
+  /if !candidate\.is_file\(\) \{\s*return Err\(\(1, format!\("no such file: \{text\}"\)\)\);/,
+  'A missing file must fail with exit status 1, not open an empty window.',
+);
+assert.match(
+  main,
+  /_ if text\.starts_with\('-'\) && text\.len\(\) > 1 => \{\s*return Err\(\(2,/,
+  'An unknown flag must fail with exit status 2.',
+);
+assert.match(
+  main,
+  /Ok\(Cli::Help\) => \{[\s\S]*?return;[\s\S]*?Err\(\(status, message\)\) => \{[\s\S]*?std::process::exit\(status\);[\s\S]*?tauri::Builder::default\(\)/,
+  'The command line must be answered before Tauri builds anything.',
+);
+assert.match(
+  main,
+  /println!\("opened \{\}"/,
+  'Each opened file must be printed on stdout so a caller can verify.',
+);
+assert.match(
+  main,
+  /tauri::Builder::default\(\)\s*(\/\/[^\n]*\n\s*)*\.plugin\(tauri_plugin_single_instance::init\(/,
+  'single-instance must be the first plugin: a second launch forwards its files and exits.',
+);
+assert.match(
+  main,
+  /tauri::RunEvent::Opened \{ urls \}[\s\S]*?deliver\(app, files\)/,
+  'macOS files arrive as an Opened event; without this arm a double-click opens nothing.',
+);
+assert.match(
+  main,
+  /fn detach\([\s\S]*?\.arg\("--wait"\)[\s\S]*?\.process_group\(0\)/,
+  'The detached child must run with --wait, in its own process group.',
+);
+assert.match(
+  main,
+  /!invocation\.wait && !cfg!\(debug_assertions\) && !must_stay && detach\(&arguments\)/,
+  'Detach only in release, only without --wait, never when LaunchServices started us.',
+);
+assert.match(
+  app,
+  /const openFilesReady = listen\('open-files'[\s\S]*?await openFilesReady;\s*const pending = await invoke\('pending_files'\)/,
+  'The open-files listener must be live before pending_files hands over to events.',
+);
+assert.match(
+  readme,
+  /## From scripts and agents/,
+  'The README must tell a program how to call this.',
+);
+
+// Updates: the webview may talk to exactly one host, only when asked, and may
+// open exactly one kind of URL, checked in Rust.
+assert.doesNotMatch(
+  csp,
+  /https?:\/\/(?!ipc\.localhost|doc\.localhost|api\.github\.com)/,
+  'The CSP must name no network host besides api.github.com for the update check.',
+);
+assert.match(
+  main,
+  /fn open_download\(url: String\)[\s\S]*?const RELEASES: &str = "https:\/\/github\.com\/ricardofrantz\/pdf-next\/releases\/";[\s\S]*?url\.starts_with\(RELEASES\)/,
+  'open_download must refuse anything but a pdf-next release URL.',
+);
+assert.match(
+  app,
+  /ui\.update\.addEventListener\('click', checkForUpdates\)/,
+  'The update check runs on a press and nowhere else.',
+);
+assert.doesNotMatch(
+  app,
+  /(?<!function )checkForUpdates\(\)/,
+  'No automatic update check: the app must not touch the network on its own.',
 );
 
 // The README must name the runtime it actually ships.
