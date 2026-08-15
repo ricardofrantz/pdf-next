@@ -141,8 +141,8 @@ assert.match(
 );
 assert.match(
   app,
-  /async function dockTo\(edge\)[\s\S]*?\(edge === 'left' \|\| edge === 'right'\)\s*\? 'page-width'\s*: 'page-fit'/,
-  'A tall half must fit the width, a short half the page, and undocking fit-page.',
+  /async function dockTo\(edge\)[\s\S]*?currentScaleValue = undocking \? 'page-fit' : 'page-width'/,
+  'Docking to any edge must fit the width; only undocking goes back to fit-page.',
 );
 assert.match(
   app,

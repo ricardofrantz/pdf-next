@@ -1160,12 +1160,12 @@ function runFind(type = '', again = false, backwards = false) {
 /// or the edge the window is already on — undocks: the automatic fit, the
 /// window wrapped around the page again, at fit-page.
 ///
-/// A tall half (left, right) fits the width, because fitting the whole page
-/// into a narrow column just shrinks the text; a short half (top, bottom)
-/// fits the page, because fit-width there would leave most of it below the
-/// fold. Resizing keeps the scroll offset in pixels, which lands on a
-/// different page once the layout reflows, so the reader goes back where it
-/// was either way.
+/// Docking anywhere fits the width: a half-screen window is there to be read
+/// in, and fit-page in one shrinks the text to fit a shape you did not choose.
+/// A short top or bottom half does leave the rest of the page below the fold,
+/// which is what scrolling is for. Resizing keeps the scroll offset in
+/// pixels, which lands on a different page once the layout reflows, so the
+/// reader goes back where it was either way.
 async function dockTo(edge) {
   const page = state.document ? pdfViewer.currentPageNumber : 0;
   const undocking = edge === 'center' || state.docked === edge;
@@ -1195,10 +1195,7 @@ async function dockTo(edge) {
     return;
   }
   window.setTimeout(() => {
-    pdfViewer.currentScaleValue =
-      !undocking && (edge === 'left' || edge === 'right')
-        ? 'page-width'
-        : 'page-fit';
+    pdfViewer.currentScaleValue = undocking ? 'page-fit' : 'page-width';
     if (page > 1) {
       pdfViewer.currentPageNumber = page;
     }

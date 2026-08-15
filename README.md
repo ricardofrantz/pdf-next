@@ -33,8 +33,8 @@ that survives a build deleting and recreating the file mid-compile.
   files, so there is no cache to manage.
 - **Dock to any half of the screen** — five toolbar buttons, or `Ctrl+Shift+←` / `→` / `↑` /
   `↓`, fill the left, right, top or bottom half, so the document takes one half and your
-  editor keeps the other. A tall half switches to fit-width, because fitting a whole page into
-  a narrow column just shrinks the text; a short half fits the page. The center button (or
+  editor keeps the other. Any dock switches to fit-width, because a half-screen window is for
+  reading in, and fitting a whole page into one just shrinks the text. The center button (or
   `Ctrl+Shift+Enter`, or pressing the same edge again) undocks: the window returns to the size
   of the page, centred, and the zoom returns to fit-page. Your place in the document survives
   every move.
@@ -109,7 +109,7 @@ pdf-next paper.pdf supp.pdf fig1.png     # three tabs, the first one showing
 | ---- | ------ |
 | `--left` | Dock to the left half of the screen (implies fit-width). |
 | `--right` | Dock to the right half (implies fit-width). |
-| `--top` / `--bottom` | Dock to the top or bottom half (implies fit-page). |
+| `--top` / `--bottom` | Dock to the top or bottom half (implies fit-width). |
 | `--night` / `--dark` | Dark pages, light text. |
 | `--sepia` / `--reader` | Warm paper. |
 | `--invert` | Invert the page, for scans and white-background figures. |
