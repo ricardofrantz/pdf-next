@@ -676,6 +676,153 @@ fn open_download(url: String) -> Result<(), String> {
     open::that_detached(&url).map_err(|error| error.to_string())
 }
 
+/// Hand the window to the operating system's own print dialog.
+///
+/// The dialog is the system's, not one of ours and not the browser's: the
+/// print panel on macOS, the GTK print dialog on Linux, and on Windows the
+/// print window every other application opens — not WebView2's in-page
+/// preview, which is what `window.print()` would give you. Printer, page
+/// range, copies, duplex, paper and quality are all the system's to offer, and
+/// pdf-next has no print settings of its own to get wrong.
+///
+/// The frontend has already laid the document out for paper by the time this
+/// is called; every platform prints what the webview holds.
+#[tauri::command]
+fn print_document(webview: tauri::Webview) -> Result<(), String> {
+    open_print_dialog(&webview)
+}
+
+/// Name the window: the file being read, and which build is reading it.
+///
+/// The text is the frontend's to compose — it knows the file and the tab — but
+/// the window is this side's to set, and WebView2 never passes document.title
+/// to the frame. A command rather than `core:window:allow-set-title` so the
+/// webview's permission list stays events and nothing else.
+#[tauri::command]
+fn set_title(title: String, window: tauri::Window) -> Result<(), String> {
+    window.set_title(&title).map_err(|error| error.to_string())
+}
+
+/// Why Windows would not be able to show a print dialog, if it would not.
+///
+/// `ShowPrintUI` reports success and then displays nothing at all when there
+/// is no working print service — the worst possible answer to Ctrl+P, and one
+/// no error path can catch, because there is no error. Asking the spooler for
+/// the list of printers first turns that silence into a sentence. It has to be
+/// this call and not `GetDefaultPrinter`, which reads the registry and so
+/// answers happily while the service behind it is stopped.
+#[cfg(windows)]
+fn printing_unavailable() -> Option<&'static str> {
+    use windows_sys::Win32::Graphics::Printing::{
+        EnumPrintersW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
+    };
+
+    // A zero-length buffer makes this a question rather than a fetch: with
+    // printers to list it fails asking for room, and how else it fails — or
+    // that it succeeds with nothing to report — is the answer.
+    let mut needed: u32 = 0;
+    let mut returned: u32 = 0;
+    let listed = unsafe {
+        EnumPrintersW(
+            PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS,
+            std::ptr::null_mut(),
+            2,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+            &mut returned,
+        )
+    };
+    if listed != 0 {
+        return if needed == 0 {
+            Some("Windows has no printer installed")
+        } else {
+            None
+        };
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        // "Your buffer is too small" — there are printers to name.
+        Some(122) => None,
+        // The spooler is not answering: stopped, or disabled outright.
+        Some(1722) | Some(6) => Some("the Windows Print Spooler service is not running"),
+        _ => Some("Windows has no printer installed"),
+    }
+}
+
+/// WebView2 asked for the system print window rather than its own preview.
+///
+/// The two ways this can go wrong are not the same, and the difference is the
+/// whole point: a runtime older than `ShowPrintUI` (it arrived in
+/// ICoreWebView2_16, runtime 110) has no system window to offer, and its own
+/// preview is better than a button that does nothing. A dialog that refuses to
+/// open is a failure to report — falling back there would answer "print" with
+/// the in-page preview this deliberately avoids, which is exactly what
+/// Windows does when the print spooler is not running.
+#[cfg(windows)]
+fn open_print_dialog(webview: &tauri::Webview) -> Result<(), String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_16, COREWEBVIEW2_PRINT_DIALOG_KIND_SYSTEM,
+    };
+    use windows::core::Interface;
+
+    enum Trouble {
+        /// This runtime has never heard of the system print window.
+        Unsupported,
+        /// It has, and Windows would not open it.
+        Refused(String),
+    }
+
+    // with_webview runs the closure on the UI thread, where the dialog has to
+    // be opened, and swallows whatever it returns — so the outcome comes back
+    // through here instead. Reading the slot straight after the call is sound
+    // only because this is a synchronous command: Tauri dispatches those on
+    // the UI thread, and with_webview runs the closure inline when it is
+    // already there. Making this `async fn` would post the closure to the
+    // event loop, and every failure would read as success.
+    if let Some(reason) = printing_unavailable() {
+        return Err(format!("Nothing to print to: {reason}."));
+    }
+
+    let trouble: std::sync::Arc<Mutex<Option<Trouble>>> = Default::default();
+    let reported = trouble.clone();
+    webview
+        .with_webview(move |platform| {
+            let show = || -> Result<(), Trouble> {
+                let core = unsafe { platform.controller().CoreWebView2() }
+                    .map_err(|error| Trouble::Refused(error.to_string()))?;
+                let printable: ICoreWebView2_16 = core.cast().map_err(|_| Trouble::Unsupported)?;
+                unsafe { printable.ShowPrintUI(COREWEBVIEW2_PRINT_DIALOG_KIND_SYSTEM) }
+                    .map_err(|error| Trouble::Refused(error.to_string()))
+            };
+            if let Err(problem) = show() {
+                if let Ok(mut slot) = reported.lock() {
+                    *slot = Some(problem);
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
+
+    match trouble.lock().ok().and_then(|mut slot| slot.take()) {
+        None => Ok(()),
+        Some(Trouble::Unsupported) => webview.print().map_err(|error| error.to_string()),
+        Some(Trouble::Refused(message)) => Err(format!(
+            "Windows would not open the print dialog ({message}).              Is the Print Spooler service running?"
+        )),
+    }
+}
+
+/// macOS runs an NSPrintOperation — the print panel, as a sheet on the window
+/// — and Linux runs webkit2gtk's print operation, which is the GTK dialog.
+/// Both are the system's own, so wry's own call is already the right one.
+///
+/// It cannot fail from here: tauri-runtime-wry discards wry's result, and wry
+/// returns Ok on macOS even when the webview says it cannot print. The Err arm
+/// is honest about the type, not a promise that a failure would reach it.
+#[cfg(not(windows))]
+fn open_print_dialog(webview: &tauri::Webview) -> Result<(), String> {
+    webview.print().map_err(|error| error.to_string())
+}
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const USAGE: &str = "\
@@ -958,7 +1105,9 @@ fn main() {
             siblings,
             read_markdown,
             snap,
-            open_download
+            open_download,
+            print_document,
+            set_title
         ])
         .setup(move |app| {
             if let Some(seconds) = launch.poll {

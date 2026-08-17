@@ -82,6 +82,15 @@
   box-sizing: border-box;
 }
 
+/* The icon sprite is markup, not a picture: it holds the <symbol>s that every
+   toolbar <use> points at, and must take no space at all. This lives here and
+   not in a style attribute on the tag because the app's CSP blocks inline
+   style attributes outright — Chromium drops them silently, and the dropped
+   one left a 300x150 box sitting above the toolbar. */
+.sprite {
+  display: none;
+}
+
 html,
 body {
   width: 100%;
@@ -771,5 +780,123 @@ body.mode-sepia #markdownStage {
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;
+  }
+}
+
+/* ── Printing ────────────────────────────────────────────────────────── */
+/* The paper layout lives entirely here. The app never resizes, re-themes or
+   otherwise disturbs the window to print: it renders the pages into
+   #printPages and hands the window to the system print dialog, and these
+   rules decide what that dialog sees. */
+#printPages {
+  display: none;
+}
+
+@media print {
+  /* Chrome is for the screen. Paper gets the document and nothing else — and
+     never the on-screen viewer, which holds only the pages you can see, at
+     screen resolution, in whatever page mode you are reading in. */
+  /* The sprite is already display:none, but say so again: it is an <svg>, and
+     one laid out on paper is enough to push the first page onto a second
+     sheet. */
+  body > svg,
+  #bar,
+  #tabs,
+  #find,
+  #status,
+  #empty,
+  #viewerContainer,
+  #imageStage {
+    display: none !important;
+  }
+
+  /* On screen the stage is a fixed scroller inside a window. On paper it has
+     to be an ordinary block, or the print is one clipped page. */
+  html,
+  body,
+  #stage,
+  #markdownStage {
+    position: static !important;
+    overflow: visible !important;
+    height: auto !important;
+    background: #ffffff !important;
+  }
+
+  #printPages {
+    display: block;
+  }
+
+  /* One page image per sheet. The @page rule set before the print gives the
+     sheet the shape of the page, so the picture fills it at true size; the
+     height cap is there so a rounding error cannot spill a sliver onto a
+     second sheet. */
+  #printPages > div {
+    break-after: page;
+    page-break-after: always;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  #printPages > div:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  /* A page image is already the size of the sheet, so max-width takes it back
+     to exactly that. `width: 100%` instead would blow a small picture up to
+     the width of the paper — a 64px icon printed eight inches wide — because
+     an image, unlike a page, brings no @page rule of its own. */
+  #printPages img {
+    display: block;
+    max-width: 100%;
+    width: auto;
+    height: auto;
+    max-height: 100vh;
+    margin: 0 auto;
+  }
+
+  /* Markdown is HTML: it prints itself, reflowing across sheets. Black on
+     white whatever mode the reader is in — a night-mode page mode is a
+     property of the screen, not of the paper — and at its own size, not the
+     zoom the window happens to be at.
+     The palette needs !important: `body.mode-night #markdownStage` outranks a
+     bare `#markdownStage`, and a media query adds no specificity of its own,
+     so without it the night palette would follow the document onto the paper
+     and print pale grey text on white. */
+  #markdownStage {
+    padding: 0 !important;
+    inset: auto !important;
+
+    --md-bg: #ffffff !important;
+    --md-fg: #000000 !important;
+    --md-dim: #4a4a4a !important;
+    --md-rule: #b8b8b8 !important;
+    --md-code-bg: #f2f2f2 !important;
+    --md-accent: #0b3f8f !important;
+  }
+
+  #markdown,
+  #markdownRaw {
+    zoom: 1 !important;
+    max-width: none !important;
+  }
+
+  #markdownRaw {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* Nothing should be orphaned from what introduces it. */
+  #markdown h1,
+  #markdown h2,
+  #markdown h3 {
+    break-after: avoid-page;
+  }
+
+  #markdown pre,
+  #markdown blockquote,
+  #markdown table,
+  #markdown img {
+    break-inside: avoid;
   }
 }

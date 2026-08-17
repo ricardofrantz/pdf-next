@@ -68,6 +68,17 @@ that survives a build deleting and recreating the file mid-compile.
   cycles Clear → Night → Invert → Sepia, so plain white pages are always one press away;
   Shift+click it to jump straight back to Clear from anywhere.
 - **Text search** with match counts, powered by PDF.js.
+- **Print with `Ctrl+P`**, to the system's own dialog — the real one, with your printer list,
+  page range, copies, duplex, paper size and scaling. pdf-next adds no print settings of its
+  own: it lays the document out for paper, then hands the window to macOS's print panel, the
+  GTK dialog, or WebView2's print preview, whichever the machine has. A PDF is re-rendered at
+  150 dpi on white, so what comes out is the page and not the screen — no toolbar, no dark
+  mode, no window chrome — and an A4 paper prints at true size on A4. Markdown reflows across
+  sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
+  same size follows the first one, as it does in every other viewer. If the machine has nothing
+  to print to — no printer, or a stopped print service — it says so rather than opening nothing.
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.6.2` — so a bug report
+  can name a version without hunting for an about box.
 - **Check for updates, when you ask.** The last toolbar button asks GitHub for the latest
   release; if it is newer, the button becomes the download and a second press fetches the
   installer for your system — `.exe`, `.dmg` or `.AppImage` — in your browser, from the
@@ -75,7 +86,8 @@ that survives a build deleting and recreating the file mid-compile.
   you press it, and this is the only host it can reach.
 - **Keyboard first:** `j`/`k` scroll, `n`/`p` pages, `g`/`G` first and last, `+`/`-` zoom,
   `←`/`→` tabs (or folder, with one file open), `Ctrl+W` close, `Ctrl+F` find, `Ctrl+R` reload,
-  `Ctrl+O` open, `Ctrl+U` raw markdown, `Ctrl+Shift+F` fit window to content,
+  `Ctrl+O` open, `Ctrl+P` print, `Ctrl+U` raw markdown,
+  `Ctrl+Shift+F` fit window to content,
   `Ctrl+Shift+←`/`→`/`↑`/`↓` dock to a screen half, `Ctrl+Shift+Enter` undock.
 
 ## Install

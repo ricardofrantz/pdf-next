@@ -2481,7 +2481,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-next"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "ammonia",
  "open",
@@ -2493,6 +2493,8 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-single-instance",
+ "webview2-com",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

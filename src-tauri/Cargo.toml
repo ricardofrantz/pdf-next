@@ -1,6 +1,6 @@
 [package]
 name = "pdf-next"
-version = "0.6.1"
+version = "0.6.2"
 description = "Tiny, fast PDF, image and markdown viewer that reloads when the file changes"
 authors = ["Ricardo Frantz"]
 license = "MIT"
@@ -12,7 +12,7 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = "2"
+tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 # A second `pdf-next file.pdf` hands its files to the running window as tabs
 # and returns at once, instead of opening a second viewer.
@@ -31,7 +31,16 @@ open = "5"
 # The release binary is a GUI-subsystem executable, which has no console of its
 # own; attaching to the parent's is what lets `--help` and `opened …` print.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_System_Console",
+    "Win32_Graphics_Printing",
+] }
+# Printing goes to the system print window, not WebView2's in-page preview:
+# that is ShowPrintUI(SYSTEM), and reaching it means talking to the WebView2
+# controller Tauri already owns. Both crates come in with tauri; the versions
+# are pinned to its own so the interfaces are the same types.
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation"] }
 
 # Small and fast beats fast-to-build: this binary is shipped, not iterated on.
 [profile.release]

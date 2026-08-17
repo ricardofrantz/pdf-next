@@ -74,6 +74,9 @@ const ui = {
   markdown: el('markdown'),
   markdownRaw: el('markdownRaw'),
   markdownStage: el('markdownStage'),
+  print: el('print'),
+  printPages: el('printPages'),
+  printRules: el('printRules'),
   status: el('status'),
 };
 
@@ -146,6 +149,23 @@ const pdfViewer = new TidyViewer({
   annotationMode: 1,
 });
 linkService.setViewer(pdfViewer);
+
+// ── Title ─────────────────────────────────────────────────────────────────
+
+/// The window title carries the build, so "which version are you on?" is
+/// answered by looking at the window rather than by hunting for an about box.
+/// The version arrives from Rust a moment after the first paint, which is why
+/// this is a function and not a constant.
+///
+/// document.title alone is not enough: WebView2 never passes it to the window,
+/// so on Windows the frame kept saying "pdf-next" whatever was open. Rust sets
+/// the real one; document.title is set too, for the platforms that follow it.
+function setTitle(name) {
+  const app = state.version ? `pdf-next ${state.version}` : 'pdf-next';
+  const title = name ? `${name} — ${app}` : app;
+  document.title = title;
+  invoke('set_title', { title }).catch(() => {});
+}
 
 // ── Status ────────────────────────────────────────────────────────────────
 
@@ -739,12 +759,18 @@ async function openFile(
   // Rebuilds can outpace loading; only the newest one may touch the UI.
   const generation = ++state.generation;
   const view = given || (preserveView ? captureView() : null);
+  // Pages rendered for paper belong to the document that was open then — but
+  // not while a dialog is holding them: a rebuild lands every second in the
+  // loop this app is for, and clearing here would print blank sheets.
+  if (!printPending) {
+    clearPrintPages();
+  }
   state.file = file;
   document.body.classList.add('has-file');
   document.body.classList.toggle('kind-pdf', file.kind === 'pdf');
   document.body.classList.toggle('kind-image', file.kind === 'image');
   document.body.classList.toggle('kind-markdown', file.kind === 'markdown');
-  document.title = `${file.name} — pdf-next`;
+  setTitle(file.name);
 
   // Free what the outgoing kind was holding: a decoded bitmap or a rendered
   // markdown DOM kept behind another tab is memory doing nothing.
@@ -959,7 +985,7 @@ async function closeAll() {
     'kind-markdown',
     'file-missing',
   );
-  document.title = 'pdf-next';
+  setTitle('');
   ui.waiting.hidden = true;
   updateSiblingControls();
   renderTabs();
@@ -1156,6 +1182,201 @@ function runFind(type = '', again = false, backwards = false) {
   });
 }
 
+// ── Printing ──────────────────────────────────────────────────────────────
+//
+// One route for all three platforms and all three kinds: lay the document out
+// for paper in the webview, then ask the system for its own print dialog — the
+// print panel on macOS, the GTK dialog on Linux, the print window every other
+// application opens on Windows. Printer, page range, copies, duplex, scaling
+// and paper size are the system's to offer; this app has no print settings of
+// its own to get wrong, and nothing to keep in sync with three platforms'
+// idea of a printer.
+//
+// Markdown and the raw view print themselves — they are HTML, and the print
+// stylesheet reflows them across pages. A PDF cannot: the viewer only ever
+// renders the pages you can see, at screen resolution, possibly inverted. So
+// every page is rendered again here, at print resolution, on white, into
+// #printPages, which is what the dialog then sees. Images take the same route
+// for the same reason: one page, one picture, no window chrome.
+
+/// 150 dpi against PDF's 72, the resolution PDF.js itself prints at: sharp on
+/// paper without making a 300-page document a gigabyte of canvas.
+const PRINT_UNITS = 150 / 72;
+
+/// A print is being prepared: the pages are still being rendered.
+let printing = false;
+/// The pages are laid out and a dialog has them. This is the one that matters:
+/// the dialog outlives the call that opened it on Windows and macOS, and this
+/// app reloads the document once a second, so without it the next rebuild —
+/// the whole reason the app exists — would empty the DOM the dialog is about
+/// to print.
+let printPending = false;
+/// Whether the window has lost focus since those pages were handed over, which
+/// is how the dialog closing is recognised where `afterprint` may not fire.
+let printBlurred = false;
+
+/// Drop the rendered pages and the object URLs holding their bitmaps.
+///
+/// The pages are not kept around: they are the largest thing this app ever
+/// allocates, and a document that has been printed once is no more likely to
+/// be printed again. Only blob URLs are revoked — an image prints through the
+/// same doc:// URL the window is showing, and revoking that would take the
+/// picture off the screen.
+function clearPrintPages() {
+  for (const img of ui.printPages.querySelectorAll('img')) {
+    if (img.src.startsWith('blob:')) {
+      URL.revokeObjectURL(img.src);
+    }
+  }
+  ui.printPages.textContent = '';
+  ui.printRules.textContent = '';
+}
+
+/// The dialog is done with the pages: drop them.
+function finishPrint() {
+  if (!printPending) {
+    return;
+  }
+  printPending = false;
+  printBlurred = false;
+  clearPrintPages();
+}
+
+/// Render every page of the open PDF onto paper-sized images.
+///
+/// One canvas is reused for all of them and released at the end, so the peak
+/// cost is a single page rather than the whole document; what stays is one PNG
+/// per page, which is what the print dialog needs in the DOM to offer a page
+/// range at all.
+async function renderPrintPages(generation) {
+  const pdf = state.document;
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d', { alpha: false });
+
+  for (let number = 1; number <= pdf.numPages; number += 1) {
+    if (state.generation !== generation) {
+      return false; // the file changed under us; that print is stale
+    }
+    if (pdf.numPages > 4) {
+      setStatus(`Preparing page ${number} of ${pdf.numPages}…`, { sticky: true });
+    }
+
+    const page = await pdf.getPage(number);
+    const viewport = page.getViewport({ scale: 1 });
+    canvas.width = Math.floor(viewport.width * PRINT_UNITS);
+    canvas.height = Math.floor(viewport.height * PRINT_UNITS);
+    // Paper is white whatever the reader's page mode is; a night-mode PDF must
+    // not come out of the printer as a solid black rectangle.
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({
+      canvasContext: context,
+      viewport,
+      transform: [PRINT_UNITS, 0, 0, PRINT_UNITS, 0, 0],
+      intent: 'print',
+    }).promise;
+    page.cleanup();
+
+    if (number === 1) {
+      // The paper takes the shape of the page, so an A4 document prints at true
+      // size on A4 and a landscape slide comes out landscape. Pages of mixed
+      // size follow the first, as they do in every other PDF viewer.
+      ui.printRules.textContent = `@page { size: ${Math.round(viewport.width)}pt ${Math.round(
+        viewport.height,
+      )}pt; margin: 0 }`;
+    }
+
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) {
+      throw new Error(`page ${number} could not be rendered`);
+    }
+    const wrapper = document.createElement('div');
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(blob);
+    img.alt = '';
+    wrapper.append(img);
+    ui.printPages.append(wrapper);
+    await img.decode().catch(() => {});
+  }
+
+  // Releasing the backing store matters more than the canvas object: a
+  // letter-size page at 150 dpi is 5 MB that nothing else would free.
+  canvas.width = 0;
+  canvas.height = 0;
+  return true;
+}
+
+/// Ctrl/Cmd+P, and the toolbar button.
+async function printDocument() {
+  if (!state.file || printing) {
+    return;
+  }
+  printing = true;
+  printPending = false;
+  printBlurred = false;
+  clearPrintPages();
+  const generation = state.generation;
+  let failed = false;
+
+  try {
+    if (state.file.kind === 'pdf') {
+      // No document, or a rebuild overtook this print: nothing to send.
+      if (!state.document || !(await renderPrintPages(generation))) {
+        return;
+      }
+    } else if (state.file.kind === 'image') {
+      const img = document.createElement('img');
+      img.src = ui.image.src;
+      img.alt = '';
+      const wrapper = document.createElement('div');
+      wrapper.append(img);
+      ui.printPages.append(wrapper);
+      await img.decode().catch(() => {});
+    }
+    setStatus('');
+    // Claimed before the call, not after: on Linux the dialog blocks and this
+    // does not return until it has been closed.
+    printPending = true;
+    await invoke('print_document');
+  } catch (error) {
+    failed = true;
+    printPending = false;
+    setStatus(`Could not print: ${error?.message || error}`, { error: true, sticky: true });
+  } finally {
+    printing = false;
+    // Every way out that never reached a dialog leaves half-built pages and a
+    // "preparing page 3 of 40" that nothing else would ever clear.
+    if (!printPending) {
+      clearPrintPages();
+      if (!failed) {
+        setStatus('');
+      }
+    }
+  }
+}
+
+// Two ways to hear that the dialog has gone. `afterprint` is the direct one,
+// and Windows fires it — measured, including when the system dialog opens onto
+// a machine with no print spooler at all. macOS and Linux never go through
+// window.print(), so there the window coming back after losing focus stands in
+// for it, where it fires: a sheet on macOS may never give the page a blur, and
+// the price of missing it is pages held until the next print rather than
+// anything printed wrongly.
+//
+// Windows is left out of that fallback deliberately. Its dialog is a separate
+// window and this one stays clickable behind it, so clicking back would
+// otherwise throw away the pages the dialog is still holding — the bug this
+// whole flag exists to prevent, through a different door.
+window.addEventListener('afterprint', finishPrint);
+window.addEventListener('blur', () => {
+  printBlurred = printPending;
+});
+window.addEventListener('focus', () => {
+  if (printBlurred && state.platform !== 'windows') {
+    finishPrint();
+  }
+});
+
 /// Five targets, one function. An edge fills that half of the screen; center —
 /// or the edge the window is already on — undocks: the automatic fit, the
 /// window wrapped around the page again, at fit-page.
@@ -1260,6 +1481,7 @@ ui.zoom.addEventListener('change', () => {
 ui.zoomIn.addEventListener('click', () => stepZoom(1));
 ui.zoomOut.addEventListener('click', () => stepZoom(-1));
 ui.mode.addEventListener('click', (event) => cycleMode(event.shiftKey || event.altKey));
+ui.print.addEventListener('click', printDocument);
 // ── Updates ───────────────────────────────────────────────────────────────
 //
 // One button and nothing automatic: the app never touches the network unless
@@ -1464,6 +1686,13 @@ window.addEventListener('keydown', (event) => {
     if (state.file?.kind === 'markdown') {
       setRaw(!state.markdownRaw);
     }
+    return;
+  }
+  // WebView2 has Ctrl+P of its own, and it would print the viewer as it stands
+  // on screen — window chrome, one visible page. Ours has to win.
+  if ((event.ctrlKey || event.metaKey) && key === 'p') {
+    event.preventDefault();
+    void printDocument();
     return;
   }
   if ((event.ctrlKey || event.metaKey) && key === 'w') {
@@ -1686,6 +1915,7 @@ try {
 const launch = await invoke('launch_options').catch(() => ({}));
 state.version = String(launch?.version || '');
 state.platform = String(launch?.platform || '');
+setTitle(state.file?.name || '');
 if (launch?.poll !== null && launch?.poll !== undefined) {
   ui.poll.value = String(launch.poll);
 }

@@ -6,9 +6,13 @@
     <title>pdf-next</title>
     <link rel="stylesheet" href="./vendor/pdfjs/web/pdf_viewer.css" />
     <link rel="stylesheet" href="./style.css" />
+    <!-- Filled before a print with the @page rule that gives the paper the
+         shape of the PDF's own pages. Empty otherwise, which leaves markdown
+         and images the margins the system prints with. -->
+    <style id="printRules"></style>
   </head>
   <body class="mode-auto">
-    <svg style="display: none" aria-hidden="true">
+    <svg class="sprite" aria-hidden="true">
       <symbol id="i-prev" viewBox="0 0 16 16" fill="none">
         <path d="M10 12L6 8L10 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       </symbol>
@@ -65,6 +69,11 @@
       <symbol id="i-update" viewBox="0 0 16 16" fill="none">
         <path d="M8 2.5V10M8 10L5 7M8 10L11 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         <path d="M2.5 10.5V12.5C2.5 13.05 2.95 13.5 3.5 13.5H12.5C13.05 13.5 13.5 13.05 13.5 12.5V10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </symbol>
+      <symbol id="i-print" viewBox="0 0 16 16" fill="none">
+        <path d="M4.5 6V2.5H11.5V6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+        <path d="M4.5 11.5H3C2.45 11.5 2 11.05 2 10.5V7C2 6.45 2.45 6 3 6H13C13.55 6 14 6.45 14 7V10.5C14 11.05 13.55 11.5 13 11.5H11.5" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+        <rect x="4.5" y="9.5" width="7" height="4" rx="0.6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
       </symbol>
       <symbol id="i-close" viewBox="0 0 16 16" fill="none">
         <path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -130,6 +139,9 @@
         </button>
         <button id="raw" type="button" class="md-only" title="Show the raw markdown (Ctrl+U)" aria-label="Show the raw markdown" aria-pressed="false">
           <svg class="icon"><use href="#i-raw"/></svg>
+        </button>
+        <button id="print" type="button" title="Print (Ctrl+P)" aria-label="Print">
+          <svg class="icon"><use href="#i-print"/></svg>
         </button>
         <button id="mode" type="button" title="Page mode (Shift+click to clear)" aria-label="Page mode" aria-pressed="false">
           <svg class="icon"><use href="#i-mode"/></svg>
@@ -208,6 +220,10 @@
 
       <div id="status" role="status" aria-live="polite"></div>
     </main>
+
+    <!-- Empty on screen. A print fills it with one image per PDF page, at
+         print resolution, and the print stylesheet hides everything else. -->
+    <div id="printPages" aria-hidden="true"></div>
 
     <script type="module" src="./app.mjs"></script>
   </body>

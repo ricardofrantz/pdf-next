@@ -385,6 +385,96 @@ assert.doesNotMatch(
   'No automatic update check: the app must not touch the network on its own.',
 );
 
+// Printing: the system's own dialog, over a document laid out for paper.
+assert.match(
+  main,
+  /ShowPrintUI\(COREWEBVIEW2_PRINT_DIALOG_KIND_SYSTEM\)/,
+  "On Windows the dialog is the system's print window, not WebView2's in-page preview.",
+);
+assert.match(
+  main,
+  /Some\(Trouble::Refused\(message\)\) => Err\(/,
+  'A dialog that refuses to open must be reported, never answered with the in-page preview.',
+);
+assert.match(
+  app,
+  /function setTitle\(name\)[\s\S]*?`pdf-next \$\{state\.version\}`[\s\S]*?invoke\('set_title', \{ title \}\)/,
+  'The window title must carry the build — and be set on the window, since WebView2 never passes document.title to the frame.',
+);
+assert.match(
+  main,
+  /fn set_title\(title: String, window: tauri::Window\)[\s\S]*?window\.set_title\(&title\)/,
+  'The window title is set from Rust, so the webview keeps its events-only permission list.',
+);
+assert.match(
+  main,
+  /fn printing_unavailable\(\)[\s\S]*?EnumPrintersW/,
+  'ShowPrintUI succeeds and shows nothing when there is no print service, so ask the spooler first and say so.',
+);
+assert.match(
+  styles,
+  /\.sprite \{\s*\n\s*display: none/,
+  'The icon sprite is hidden from the stylesheet: the CSP drops style attributes, and the dropped one laid the sprite out above the toolbar.',
+);
+assert.doesNotMatch(
+  await readFile('src/index.html', 'utf8'),
+  /style="/,
+  'No style attributes in the markup — the CSP blocks them, silently.',
+);
+assert.ok(
+  true,
+);
+assert.match(
+  main,
+  /#\[cfg\(not\(windows\)\)\]\s*fn open_print_dialog[\s\S]*?webview\.print\(\)/,
+  "Elsewhere wry's own call is already the system dialog: a sheet on macOS, GTK on Linux.",
+);
+assert.match(
+  app,
+  /async function printDocument\(\)[\s\S]*?await invoke\('print_document'\)/,
+  'The print button and Ctrl+P must ask Rust for the dialog.',
+);
+assert.match(
+  app,
+  /key === 'p'\) \{\s*event\.preventDefault\(\)/,
+  "Ctrl+P must be taken from the webview, which would print the screen instead.",
+);
+assert.match(
+  app,
+  /intent: 'print'[\s\S]*?canvas\.width = 0;\s*canvas\.height = 0;/,
+  'One scratch canvas for the whole document, released when the pages are made.',
+);
+assert.match(
+  app,
+  /context\.fillStyle = '#ffffff'/,
+  'Printed pages are white: a page mode is a property of the screen.',
+);
+assert.match(
+  app,
+  /window\.addEventListener\('afterprint', finishPrint\)[\s\S]*?if \(printBlurred && state\.platform !== 'windows'\)/,
+  "afterprint is the Windows signal; macOS and Linux never call window.print(), so the window coming back stands in for it there — but never on Windows, whose dialog is a separate window this one stays clickable behind.",
+);
+assert.match(
+  app,
+  /if \(!printPending\) \{\s*clearPrintPages\(\);\s*\}/,
+  'A rebuild lands every second: opening a file must not empty the pages a dialog is holding.',
+);
+assert.match(
+  styles,
+  /@media print \{[\s\S]*?--md-fg: #000000 !important/,
+  'The print palette must outrank body.mode-night, which is more specific than a bare id and would otherwise print pale text on white.',
+);
+assert.doesNotMatch(
+  app,
+  /await invoke\('print_document'\);\s*clearPrintPages\(\)/,
+  'The dialog outlives the call on Windows and macOS: clearing here empties it.',
+);
+assert.match(
+  styles,
+  /@media print \{[\s\S]*?body > svg,[\s\S]*?#imageStage \{\s*\n\s*display: none !important/,
+  'The on-screen viewer must never be what goes on paper — nor the icon sprite, which is laid out on paper however hidden it looks and pushes page one onto a second sheet.',
+);
+
 // The README must name the runtime it actually ships.
 const vendored = version.match(/Version:\s*(\S+)/)?.[1];
 assert.ok(vendored, 'src/vendor/PDFJS_VERSION must record a version.');
