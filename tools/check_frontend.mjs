@@ -376,13 +376,18 @@ assert.match(
 );
 assert.match(
   app,
-  /ui\.update\.addEventListener\('click', checkForUpdates\)/,
-  'The update check runs on a press and nowhere else.',
+  /ui\.update\.addEventListener\('click', \(\) => checkForUpdates\(\)\)/,
+  'The update check runs on a press.',
+);
+assert.match(
+  app,
+  /window\.setTimeout\(\(\) => \{\s*void checkForUpdates\(\{ quiet: true \}\);\s*\}, \d+\);/,
+  'One quiet check at launch, delayed past the first paint.',
 );
 assert.doesNotMatch(
   app,
-  /(?<!function )checkForUpdates\(\)/,
-  'No automatic update check: the app must not touch the network on its own.',
+  /setInterval\([\s\S]*?checkForUpdates/,
+  'No polling for updates: one check at launch, then only on a press.',
 );
 
 // Printing: the system's own dialog, over a document laid out for paper.

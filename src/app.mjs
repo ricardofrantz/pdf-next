@@ -1634,10 +1634,13 @@ ui.mode.addEventListener('click', (event) => cycleMode(event.shiftKey || event.a
 ui.print.addEventListener('click', printDocument);
 // ── Updates ───────────────────────────────────────────────────────────────
 //
-// One button and nothing automatic: the app never touches the network unless
-// you press it. A press asks GitHub for the latest release; if it is newer,
-// the same button becomes the download — opened in your browser, so the file
-// arrives visibly, from the repo, the same way a first install does.
+// One button, and one check at launch. Starting the app asks GitHub for the
+// latest release, once, a moment after the first paint; a press asks again.
+// If it is newer the button lights up and becomes the download — opened in
+// your browser, so the file arrives visibly, from the repo, the same way a
+// first install does. Nothing polls: there is no timer and no background
+// check, and the launch check is the only network request the app makes on
+// its own.
 
 const RELEASES_API =
   'https://api.github.com/repos/ricardofrantz/pdf-next/releases/latest';
@@ -1674,7 +1677,10 @@ function pickAsset(assets, platform) {
   return null;
 }
 
-async function checkForUpdates() {
+/// A press, or the one check at launch. `quiet` is the launch: it says
+/// nothing unless there is a newer release, so an offline machine or a
+/// current build gets no message at all.
+async function checkForUpdates({ quiet = false } = {}) {
   if (state.update) {
     try {
       await invoke('open_download', { url: state.update.url });
@@ -1685,7 +1691,9 @@ async function checkForUpdates() {
     return;
   }
   ui.update.disabled = true;
-  setStatus('Checking for updates…', { sticky: true });
+  if (!quiet) {
+    setStatus('Checking for updates…', { sticky: true });
+  }
   try {
     const response = await fetch(RELEASES_API, {
       headers: { Accept: 'application/vnd.github+json' },
@@ -1701,7 +1709,9 @@ async function checkForUpdates() {
       throw new Error('could not read the version number');
     }
     if (!isNewer(latest, current)) {
-      setStatus(`You have the latest version (${state.version})`);
+      if (!quiet) {
+        setStatus(`You have the latest version (${state.version})`);
+      }
       return;
     }
     const version = latest.join('.');
@@ -1713,19 +1723,24 @@ async function checkForUpdates() {
     ui.update.classList.add('available');
     ui.update.title = `Download pdf-next ${version}`;
     ui.update.setAttribute('aria-label', ui.update.title);
-    setStatus(`pdf-next ${version} is available — press the button again to download it`, {
-      sticky: true,
-    });
+    setStatus(
+      quiet
+        ? `pdf-next ${version} is available — press the update button to download it`
+        : `pdf-next ${version} is available — press the button again to download it`,
+      { sticky: true },
+    );
   } catch (error) {
-    setStatus(`Could not check for updates: ${error?.message || error}`, {
-      error: true,
-    });
+    if (!quiet) {
+      setStatus(`Could not check for updates: ${error?.message || error}`, {
+        error: true,
+      });
+    }
   } finally {
     ui.update.disabled = false;
   }
 }
 
-ui.update.addEventListener('click', checkForUpdates);
+ui.update.addEventListener('click', () => checkForUpdates());
 ui.wrap.addEventListener('click', toggleWrap);
 ui.raw.addEventListener('click', () => setRaw(!state.markdownRaw));
 
@@ -2163,3 +2178,9 @@ if (initial) {
   await openMany(pending);
 }
 ui.container.focus();
+
+// The launch check, after the document is up so the first paint never waits on
+// the network. Quiet: an offline machine or a current build hears nothing.
+window.setTimeout(() => {
+  void checkForUpdates({ quiet: true });
+}, 3000);

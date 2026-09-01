@@ -78,13 +78,14 @@ that survives a build deleting and recreating the file mid-compile.
   sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
   same size follows the first one, as it does in every other viewer. If the machine has nothing
   to print to — no printer, or a stopped print service — it says so rather than opening nothing.
-- **The title says which build you are running** — `paper.pdf — pdf-next 0.7.0` — so a bug report
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.7.1` — so a bug report
   can name a version without hunting for an about box.
-- **Check for updates, when you ask.** The last toolbar button asks GitHub for the latest
-  release; if it is newer, the button becomes the download and a second press fetches the
-  installer for your system — `.exe`, `.dmg` or `.AppImage` — in your browser, from the
-  repo's own Releases page. Nothing runs on its own: the app never touches the network unless
-  you press it, and this is the only host it can reach.
+- **Tells you when there is a newer version.** A few seconds after launch the app asks
+  GitHub for the latest release, once; if it is newer, the last toolbar button lights up and a
+  press fetches the installer for your system — `.exe`, `.dmg` or `.AppImage` — in your
+  browser, from the repo's own Releases page. Pressing the button checks again on demand.
+  Nothing polls: that one request at launch is the only network access the app makes on its
+  own, downloads only ever happen on a press, and GitHub is the only host it can reach.
 - **Keyboard first:** `j`/`k` scroll, `n`/`p` pages, `g`/`G` first and last, `+`/`-` zoom,
   `←`/`→` tabs (or folder, with one file open), `Ctrl+W` close, `Ctrl+F` find, `Ctrl+R` reload,
   `Ctrl+O` open, `Ctrl+P` print, `Ctrl+U` raw markdown,
