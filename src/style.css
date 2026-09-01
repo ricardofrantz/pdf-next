@@ -436,6 +436,21 @@ body.image-zoomed #image {
   max-width: none;
 }
 
+/* Rotation. A CSS transform turns the picture but not its layout box, so the
+   box is sized by script to the turned picture and the image is centred in
+   it, then rotated in place. --image-turn is set on the box. */
+#imageBox {
+  position: relative;
+}
+
+body.image-turned #image {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  max-width: none;
+  transform: translate(-50%, -50%) rotate(var(--image-turn, 0deg));
+}
+
 /* Wrapping the window around the content means exactly that: no padding, and
    no ring — the window frame is the edge of the picture now. */
 body.wrap-on #imageStage {

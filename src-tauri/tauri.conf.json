@@ -44,7 +44,7 @@
         "role": "Viewer"
       },
       {
-        "ext": ["png", "jpg", "jpeg", "webp", "avif"],
+        "ext": ["png", "jpg", "jpeg", "webp", "avif", "gif", "bmp"],
         "name": "Image",
         "description": "Image file",
         "role": "Viewer"

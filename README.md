@@ -52,7 +52,8 @@ that survives a build deleting and recreating the file mid-compile.
 - **Walk a folder of figures.** With a single file open, `←` / `→` (or the toolbar arrows) step
   through every image next to it, in reading order — `fig2` before `fig10`, not after it. The
   toolbar shows your position, and the window stays where it is instead of resizing on every
-  press.
+  press. A rotate button next to the arrows turns the picture a quarter turn clockwise per
+  press; the next file comes up upright again.
 - **PDF, images and markdown.** `.pdf`, plus `.png`, `.jpg`, `.webp` and `.avif`, plus `.md`.
   Images zoom too, with the same control and keys as a PDF.
 - **Markdown, rendered or raw.** A `.md` opens as a typeset reading column — GitHub-style
@@ -149,7 +150,8 @@ pdf-next --bogus               # "unknown flag --bogus (try --help)", exit 2
 ```
 
 Exit status is `0` when the file was launched or handed to the running window, `1` for a
-file that does not exist, `2` for a command line it could not understand. Relative paths
+file that does not exist or is not a kind pdf-next can show, `2` for a command line it
+could not understand. Relative paths
 resolve against the caller's directory, including when they are forwarded to a running
 instance. On macOS and Linux the launched process detaches by default (own process group,
 so a shell tool's timeout cannot take the window down); pass `--wait` to hold the terminal,

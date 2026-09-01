@@ -70,7 +70,9 @@ const ui = {
   container: el('viewerContainer'),
   viewer: el('viewer'),
   image: el('image'),
+  imageBox: el('imageBox'),
   imageStage: el('imageStage'),
+  rotate: el('rotate'),
   markdown: el('markdown'),
   markdownRaw: el('markdownRaw'),
   markdownStage: el('markdownStage'),
@@ -90,6 +92,9 @@ const state = {
   docked: null,
   wrap: false,
   imageScale: 'fit',
+  /// Quarter turns clockwise, as degrees: 0, 90, 180 or 270. Per view, not per
+  /// file — a fresh open comes up upright.
+  imageRotation: 0,
   markdownScale: 1,
   markdownRaw: false,
   statusTimer: 0,
@@ -160,10 +165,18 @@ linkService.setViewer(pdfViewer);
 /// document.title alone is not enough: WebView2 never passes it to the window,
 /// so on Windows the frame kept saying "pdf-next" whatever was open. Rust sets
 /// the real one; document.title is set too, for the platforms that follow it.
+let sentTitle = null;
+
 function setTitle(name) {
   const app = state.version ? `pdf-next ${state.version}` : 'pdf-next';
   const title = name ? `${name} — ${app}` : app;
   document.title = title;
+  // A reload every second would otherwise cross the IPC boundary every second
+  // to set the title it already has.
+  if (title === sentTitle) {
+    return;
+  }
+  sentTitle = title;
   invoke('set_title', { title }).catch(() => {});
 }
 
@@ -188,6 +201,7 @@ function captureView() {
     return {
       kind: 'image',
       scale: state.imageScale,
+      rotation: state.imageRotation,
       top: ui.imageStage.scrollTop,
       left: ui.imageStage.scrollLeft,
     };
@@ -230,6 +244,7 @@ function restoreImageView(view) {
   if (!view || view.kind !== 'image') {
     return;
   }
+  setImageRotation(view.rotation || 0, { refit: false });
   setImageScale(view.scale, { refit: false });
   ui.imageStage.scrollTop = view.top;
   ui.imageStage.scrollLeft = view.left;
@@ -382,14 +397,84 @@ async function sizeToDocument(path, contentWidth, contentHeight) {
 function setImageScale(value, { refit = true } = {}) {
   state.imageScale = value;
   document.body.classList.toggle('image-zoomed', value !== 'fit');
-  if (value === 'fit') {
-    ui.image.style.width = '';
-    ui.image.style.height = '';
-  } else if (ui.image.naturalWidth) {
-    ui.image.style.width = `${Math.round(ui.image.naturalWidth * value)}px`;
-    ui.image.style.height = 'auto';
-  }
+  layoutImage();
   updateZoomControl(value === 'fit' ? 'auto' : String(value), imageScale());
+  if (refit) {
+    scheduleWrap();
+  }
+}
+
+/// The picture's natural size as it reads on screen: a quarter turn swaps
+/// width and height.
+function turnedNatural() {
+  const { naturalWidth: width, naturalHeight: height } = ui.image;
+  return state.imageRotation % 180 === 0 ? [width, height] : [height, width];
+}
+
+/// The stage's padding, which fit-width has to leave alone on each side.
+function stagePadding() {
+  const style = getComputedStyle(ui.imageStage);
+  return [
+    Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight),
+    Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom),
+  ];
+}
+
+/// Size the picture and its box for the current scale and rotation.
+///
+/// Upright, the stylesheet does the work: the box wraps the image, and 'fit'
+/// is max-width:100%. Turned, the box is given the turned picture's size —
+/// scale times the swapped natural size, or the stage width for 'fit' — and
+/// the image inside is given its own, unturned size, then rotated in place by
+/// the stylesheet. Scrolling, zoom, wrap and the window fit all read the box.
+function layoutImage() {
+  const rotation = state.imageRotation;
+  const { naturalWidth: width, naturalHeight: height } = ui.image;
+  ui.imageBox.style.setProperty('--image-turn', `${rotation}deg`);
+  document.body.classList.toggle('image-turned', rotation !== 0);
+
+  if (rotation === 0 || !width) {
+    ui.imageBox.style.width = '';
+    ui.imageBox.style.height = '';
+    if (state.imageScale === 'fit' || !width) {
+      ui.image.style.width = '';
+      ui.image.style.height = '';
+    } else {
+      ui.image.style.width = `${Math.round(width * state.imageScale)}px`;
+      ui.image.style.height = 'auto';
+    }
+    return;
+  }
+
+  const [turnedWidth, turnedHeight] = turnedNatural();
+  let shownWidth;
+  if (typeof state.imageScale === 'number') {
+    shownWidth = turnedWidth * state.imageScale;
+  } else {
+    const [padX] = stagePadding();
+    shownWidth = Math.min(turnedWidth, ui.imageStage.clientWidth - padX);
+  }
+  const shownHeight = (shownWidth * turnedHeight) / turnedWidth;
+  const quarter = rotation % 180 !== 0;
+  ui.imageBox.style.width = `${Math.round(shownWidth)}px`;
+  ui.imageBox.style.height = `${Math.round(shownHeight)}px`;
+  ui.image.style.width = `${Math.round(quarter ? shownHeight : shownWidth)}px`;
+  ui.image.style.height = `${Math.round(quarter ? shownWidth : shownHeight)}px`;
+}
+
+/// One button, a quarter turn clockwise per press; four presses is upright.
+/// The zoom is untouched — 100% is still one picture pixel per screen pixel —
+/// so only the box changes shape, and the window follows it when wrapping.
+function setImageRotation(degrees, { refit = true } = {}) {
+  state.imageRotation = ((degrees % 360) + 360) % 360;
+  const turned = state.imageRotation !== 0;
+  ui.rotate.classList.toggle('on', turned);
+  ui.rotate.setAttribute('aria-pressed', String(turned));
+  ui.rotate.title = turned
+    ? `Rotated ${state.imageRotation}° — click for another quarter turn`
+    : 'Rotate a quarter turn clockwise';
+  ui.rotate.setAttribute('aria-label', ui.rotate.title);
+  layoutImage();
   if (refit) {
     scheduleWrap();
   }
@@ -406,13 +491,11 @@ function imageScale() {
 
 /// The scale at which the whole image fits inside the stage, both axes.
 function imageContainScale() {
-  const { naturalWidth: width, naturalHeight: height } = ui.image;
+  const [width, height] = turnedNatural();
   if (!width || !height) {
     return 1;
   }
-  const style = getComputedStyle(ui.imageStage);
-  const padX = Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight);
-  const padY = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
+  const [padX, padY] = stagePadding();
   return Math.min(
     (ui.imageStage.clientWidth - padX) / width,
     (ui.imageStage.clientHeight - padY) / height,
@@ -450,6 +533,7 @@ function setMarkdownScale(scale) {
   ui.markdown.style.zoom = String(scale);
   ui.markdownRaw.style.zoom = String(scale);
   updateZoomControl(String(scale), scale);
+  scheduleWrap();
 }
 
 /// The HTML arrives already sanitized — ammonia ran on the Rust side — so
@@ -506,7 +590,18 @@ function contentSize() {
     if (!ui.image.naturalWidth) {
       return null;
     }
-    return [Math.ceil(ui.image.offsetWidth), Math.ceil(ui.image.offsetHeight)];
+    // The box, not the image: turned a quarter, the image's own box is the
+    // wrong way round.
+    return [Math.ceil(ui.imageBox.offsetWidth), Math.ceil(ui.imageBox.offsetHeight)];
+  }
+  if (state.file?.kind === 'markdown') {
+    // The column as laid out, and the whole scroll height: prose has no page,
+    // so wrapping it means a window the height of the document, up to the
+    // screen.
+    return [
+      Math.ceil(ui.markdown.offsetWidth || MARKDOWN_WINDOW_WIDTH),
+      Math.ceil(ui.markdownStage.scrollHeight),
+    ];
   }
   if (!state.document) {
     return null;
@@ -536,6 +631,18 @@ function wrapWindowSize() {
 
 let wrapTimer = 0;
 let wrapping = false;
+let holdTimer = 0;
+
+/// The app is about to resize the window itself. The resize listener must not
+/// take that for a size the reader chose and remember it; the hold lasts long
+/// enough for the resize to land and its event to fire.
+function holdResize() {
+  wrapping = true;
+  window.clearTimeout(holdTimer);
+  holdTimer = window.setTimeout(() => {
+    wrapping = false;
+  }, 700);
+}
 
 /// Coalesce the refits: holding + would otherwise fire a set_size per step.
 function scheduleWrap() {
@@ -551,15 +658,13 @@ async function applyWrap() {
   if (!size) {
     return;
   }
-  wrapping = true;
+  holdResize();
   try {
     await fitWindow(size[0], size[1], false, true);
   } finally {
-    // Let the resize land before the resize listener is allowed to treat it as
-    // a size the reader chose and remember it.
-    window.setTimeout(() => {
-      wrapping = false;
-    }, 700);
+    // Restart the hold now the call has returned, so it covers the resize
+    // event that follows rather than the round trip that preceded it.
+    holdResize();
   }
 }
 
@@ -625,7 +730,7 @@ async function showPdf(file, view, generation) {
     url: sourceUrl(file),
     // Reuse the one worker; without this every reload starts a new thread.
     worker: pdfWorker,
-    // The asset protocol answers full GETs only (no Accept-Ranges), so range
+    // The doc protocol answers full GETs only (no Accept-Ranges), so range
     // options would be inert. One streamed read per load is what happens.
     disableRange: true,
     cMapUrl: './vendor/pdfjs/cmaps/',
@@ -734,6 +839,11 @@ async function stepSibling(delta) {
 }
 
 function showImage(file, fit, view) {
+  if (!view) {
+    // A new picture comes up upright. Reset before the swap so the old turn
+    // is not applied to the new bitmap for the frame it takes to decode.
+    setImageRotation(0, { refit: false });
+  }
   ui.image.src = sourceUrl(file);
   ui.image.alt = file.name;
   ui.image.decode?.().then(
@@ -765,6 +875,27 @@ async function openFile(
   if (!printPending) {
     clearPrintPages();
   }
+  const supported = ['pdf', 'image', 'markdown'].includes(file.kind);
+  if (!supported) {
+    // Nothing can show this, so nothing of the previous file should stay
+    // behind it: the empty state comes back, not a stage with a stale PDF.
+    state.file = null;
+    state.natural = null;
+    await releaseDocument();
+    ui.image.removeAttribute('src');
+    ui.markdown.textContent = '';
+    ui.markdownRaw.textContent = '';
+    document.body.classList.remove(
+      'has-file',
+      'kind-pdf',
+      'kind-image',
+      'kind-markdown',
+      'file-missing',
+    );
+    setTitle('');
+    setStatus(`Unsupported file type: ${file.name}`, { error: true, sticky: true });
+    return;
+  }
   state.file = file;
   document.body.classList.add('has-file');
   document.body.classList.toggle('kind-pdf', file.kind === 'pdf');
@@ -790,9 +921,6 @@ async function openFile(
       void loadSiblings(file);
     } else if (file.kind === 'markdown') {
       await showMarkdown(file, view, generation, !view && !keepWindow);
-    } else {
-      setStatus(`Unsupported file type: ${file.name}`, { error: true, sticky: true });
-      return;
     }
     document.body.classList.remove('file-missing');
   } catch (error) {
@@ -807,10 +935,10 @@ async function openFile(
   }
 }
 
-async function openPath(path) {
+async function openPath(path, { activate = true } = {}) {
   try {
     const file = await invoke('open_path', { path });
-    await openInTab(file);
+    await openInTab(file, { activate });
   } catch (error) {
     setStatus(String(error), { error: true, sticky: true });
   }
@@ -886,15 +1014,28 @@ function renderTabs() {
 
 /// Focus the file if it is already open; otherwise add it next to the current
 /// tab, where a file opened from the one you are reading belongs.
-async function openInTab(file) {
+///
+/// `activate: false` adds the tab and loads nothing: ten files dropped at once
+/// cost one parse, not ten, and the one you are looking at stays put. A file
+/// already open is left alone in that case.
+async function openInTab(file, { activate = true } = {}) {
   const existing = state.tabs.findIndex((tab) => tab.path === file.path);
   if (existing >= 0) {
-    await activateTab(existing, { force: true });
+    if (activate) {
+      await activateTab(existing, { force: true });
+    }
     return;
   }
-  stashView();
   const entry = { path: file.path, name: file.name, kind: file.kind };
+  if (!activate) {
+    // Appended, not inserted next to the active tab: files that arrive
+    // together must keep the order they arrived in.
+    state.tabs.push(entry);
+    renderTabs();
+    return;
+  }
   const at = state.active < 0 ? state.tabs.length : state.active + 1;
+  stashView();
   state.tabs.splice(at, 0, entry);
   state.active = at;
   renderTabs();
@@ -977,6 +1118,7 @@ async function closeAll() {
   ui.image.removeAttribute('src');
   ui.markdown.textContent = '';
   ui.markdownRaw.textContent = '';
+  setImageRotation(0, { refit: false });
   setImageScale('fit', { refit: false });
   document.body.classList.remove(
     'has-file',
@@ -1397,6 +1539,9 @@ async function dockTo(edge) {
     setWrap(false);
   }
 
+  // A half-screen window is the app's choice, not the reader's: it must not be
+  // remembered as the size to reopen this file at.
+  holdResize();
   try {
     if (undocking) {
       const auto = autoWindowSize();
@@ -1409,14 +1554,19 @@ async function dockTo(edge) {
     }
   } catch {
     return;
+  } finally {
+    holdResize();
   }
 
   setDocked(undocking ? null : edge);
   if (!state.document) {
     return;
   }
+  // The preset is set now; the container observer re-applies it once the window
+  // has actually changed shape. The delay is for the page: restoring it before
+  // the reflow lands puts the scroll offset on the old layout.
+  pdfViewer.currentScaleValue = undocking ? 'page-fit' : 'page-width';
   window.setTimeout(() => {
-    pdfViewer.currentScaleValue = undocking ? 'page-fit' : 'page-width';
     if (page > 1) {
       pdfViewer.currentPageNumber = page;
     }
@@ -1578,11 +1728,47 @@ async function checkForUpdates() {
 ui.update.addEventListener('click', checkForUpdates);
 ui.wrap.addEventListener('click', toggleWrap);
 ui.raw.addEventListener('click', () => setRaw(!state.markdownRaw));
+
+// A link in a markdown file must not leave the page. A relative one —
+// `[notes](other.md)` — resolves against the app origin, which the navigation
+// guard trusts, so following it would replace the viewer with a blank 404 and
+// no way back. Rust now refuses relative URLs too; this is the second lock.
+// Only same-page anchors — footnotes, and headings that carry an id — do
+// anything, and they scroll rather than navigate.
+ui.markdown.addEventListener('click', (event) => {
+  const anchor =
+    event.target instanceof Element ? event.target.closest('a[href]') : null;
+  if (!anchor) {
+    return;
+  }
+  event.preventDefault();
+  const href = anchor.getAttribute('href') || '';
+  if (!href.startsWith('#') || href.length < 2) {
+    return;
+  }
+  let id;
+  try {
+    id = decodeURIComponent(href.slice(1));
+  } catch {
+    return;
+  }
+  const target = ui.markdown.querySelector(`[id="${CSS.escape(id)}"]`);
+  target?.scrollIntoView({ block: 'start' });
+});
 for (const [edge, button] of Object.entries(ui.dockButtons)) {
   button.addEventListener('click', () => dockTo(edge));
 }
 ui.imagePrev.addEventListener('click', () => stepSibling(-1));
 ui.imageNext.addEventListener('click', () => stepSibling(1));
+ui.rotate.addEventListener('click', () => setImageRotation(state.imageRotation + 90));
+
+// A turned picture at 'fit' is sized by script, not by max-width, so it has to
+// be laid out again when the stage changes shape. Upright it costs nothing.
+new ResizeObserver(() => {
+  if (state.file?.kind === 'image' && state.imageRotation !== 0 && state.imageScale === 'fit') {
+    layoutImage();
+  }
+}).observe(ui.imageStage);
 
 ui.poll.addEventListener('change', () => {
   const seconds = Number(ui.poll.value) || 0;
@@ -1611,6 +1797,26 @@ window.addEventListener('resize', () => {
     }
   }, 600);
 });
+
+// A preset — fit page, fit width, auto — is a promise about the viewport, and
+// PDF.js on its own only keeps it at the size the viewport had when it was
+// chosen. Re-applying the same preset makes it recompute; it says nothing if
+// the scale comes out unchanged. Watched on the container rather than the
+// window, because the tab strip appearing takes height off the viewport
+// without the window changing at all. One frame per burst of resize events.
+let refitFrame = 0;
+new ResizeObserver(() => {
+  if (!state.document || !Number.isNaN(Number.parseFloat(pdfViewer.currentScaleValue))) {
+    return;
+  }
+  window.cancelAnimationFrame(refitFrame);
+  refitFrame = window.requestAnimationFrame(() => {
+    if (state.document) {
+      pdfViewer.currentScaleValue = pdfViewer.currentScaleValue;
+    }
+  });
+}).observe(ui.container);
+
 ui.findToggle.addEventListener('click', () => (ui.find.hidden ? openFind() : closeFind()));
 ui.findClose.addEventListener('click', closeFind);
 ui.findNext.addEventListener('click', () => runFind('again', true, false));
@@ -1811,11 +2017,15 @@ window.addEventListener('keydown', (event) => {
 // Several at once open as tabs, and the first one is the one you end up
 // looking at.
 async function openMany(paths) {
-  for (const path of paths) {
-    await openPath(path);
+  const [first, ...rest] = paths;
+  if (first === undefined) {
+    return;
   }
-  if (paths.length > 1) {
-    await activateTab(state.tabs.findIndex((tab) => tab.path === paths[0]));
+  await openPath(first);
+  // The rest become tabs and nothing more: a tab is read from disk when it is
+  // switched to, so loading it now would be a parse nobody sees.
+  for (const path of rest) {
+    await openPath(path, { activate: false });
   }
 }
 
@@ -1916,8 +2126,14 @@ const launch = await invoke('launch_options').catch(() => ({}));
 state.version = String(launch?.version || '');
 state.platform = String(launch?.platform || '');
 setTitle(state.file?.name || '');
-if (launch?.poll !== null && launch?.poll !== undefined) {
-  ui.poll.value = String(launch.poll);
+if (typeof launch?.poll === 'number') {
+  // The flag wins over the saved preference, which was already sent above.
+  // The control only knows a few values; a --poll it cannot show is left
+  // reading whatever it did, while the watcher runs at what was asked.
+  if (ui.poll.querySelector(`option[value="${launch.poll}"]`)) {
+    ui.poll.value = String(launch.poll);
+  }
+  await invoke('set_poll_seconds', { seconds: launch.poll }).catch(() => {});
 }
 if (launch?.mode) {
   const requested = launch.mode === 'clear' ? null : launch.mode;
@@ -1935,11 +2151,10 @@ const pending = await invoke('pending_files').catch(() => []);
 if (initial) {
   await openInTab(initial);
   // Extra paths on the command line become tabs; the first one stays showing.
+  // The launch file may be queued again among the pending ones; openInTab
+  // knows it already and leaves it alone.
   for (const path of [...(launch?.rest || []), ...pending]) {
-    await openPath(path);
-  }
-  if (state.tabs.length > 1) {
-    await activateTab(0);
+    await openPath(path, { activate: false });
   }
   if (['left', 'right', 'top', 'bottom'].includes(launch?.dock)) {
     await dockTo(launch.dock);

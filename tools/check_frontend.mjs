@@ -98,12 +98,12 @@ assert.match(
 );
 assert.match(
   main,
-  /if !state\.missing \{[\s\S]*?kind: "missing"/,
+  /if missing \{\s*continue;[\s\S]*?state\.missing = true;[\s\S]*?kind: "missing"/,
   'A vanished file must report once and keep the last render on screen.',
 );
 assert.match(
   main,
-  /let reappeared = state\.missing;[\s\S]*?if changed \|\| reappeared/,
+  /let reappeared = missing;[\s\S]*?if changed \|\| reappeared/,
   'A file that reappears after a build must trigger a reload.',
 );
 
@@ -180,7 +180,7 @@ assert.match(
 );
 assert.match(
   app,
-  /function contentSize\(\)[\s\S]*?Math\.ceil\(ui\.image\.offsetWidth\)/,
+  /function contentSize\(\)[\s\S]*?Math\.ceil\(ui\.imageBox\.offsetWidth\)/,
   'The fit must measure the rendered element, ceiled — a fractional size raises a scrollbar.',
 );
 assert.match(

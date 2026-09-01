@@ -18,8 +18,9 @@ use serde::Serialize;
 use tauri::{http, AppHandle, Emitter, Manager, State, Theme, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
-/// Poll cadence in seconds; 0 turns watching off. Changing it takes effect on
-/// the next tick.
+/// Poll cadence in seconds; 0 turns watching off. The watcher re-reads this
+/// every half second while it waits, so a change takes effect within one
+/// IDLE_TICK rather than at the end of the old interval.
 static POLL_SECONDS: AtomicU64 = AtomicU64::new(1);
 const IDLE_TICK: Duration = Duration::from_millis(500);
 
@@ -32,9 +33,10 @@ struct WatchState {
     modified: Option<SystemTime>,
     len: u64,
     missing: bool,
-    /// Every file the reader has opened this session, canonicalized. This is
-    /// the whole trust boundary for file access: the doc protocol and the
-    /// markdown renderer serve members of this set and nothing else.
+    /// Every file the reader has opened this session, canonicalized. The doc
+    /// protocol and the markdown renderer serve members of this set and
+    /// nothing else; `adopt` is the only way in, and it takes supported kinds
+    /// only.
     allowed: HashSet<PathBuf>,
     /// Files that arrived before the frontend was listening — from a Finder
     /// double-click on macOS, or a second `pdf-next` run — waiting to be
@@ -79,9 +81,22 @@ fn kind_for(path: &Path) -> &'static str {
     }
 }
 
+/// Windows canonical paths carry a `\\?\` prefix no person types, and a
+/// network path becomes `\\?\UNC\server\share\…`. Both are turned back into
+/// the form a person would type; everything the frontend hands back is
+/// canonicalized again before use, so the shorter form is as good as the long
+/// one.
+fn display_path(path: &Path) -> String {
+    let shown = path.to_string_lossy();
+    if let Some(unc) = shown.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string()
+}
+
 fn describe(path: &Path) -> FileInfo {
     FileInfo {
-        path: path.to_string_lossy().to_string(),
+        path: display_path(path),
         name: path
             .file_name()
             .map(|value| value.to_string_lossy().to_string())
@@ -133,12 +148,21 @@ fn is_complete(path: &Path) -> bool {
 
 /// Point the watcher at a file and describe it for the frontend.
 ///
-/// This is also where the webview earns the right to read that one file: the
-/// doc protocol serves only paths recorded here, so nothing else on disk is
-/// reachable even if a document manages to run script at the app origin.
+/// This is also where a file joins the served set: the doc protocol and the
+/// markdown renderer answer only for paths recorded here. The set is the
+/// files the reader has named — on the command line, in the dialog, by
+/// dropping them, or by stepping through a folder — and only of the kinds the
+/// viewer can show. The webview can name a path itself, so this is a limit on
+/// what is served, not a proof that nothing else is reachable.
 fn adopt(watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
     if !path.exists() {
         return Err(format!("{} does not exist", path.display()));
+    }
+    if kind_for(&path) == "unknown" {
+        return Err(format!(
+            "unsupported file type: {}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
     }
     let canonical = std::fs::canonicalize(&path).unwrap_or(path);
     let (modified, len) = stat(&canonical).unwrap_or((None, 0));
@@ -160,7 +184,11 @@ fn open_path(path: String, watched: State<'_, Watched>) -> Result<FileInfo, Stri
 }
 
 /// Sort the way a person reads file names: `fig2` before `fig10`.
-fn natural_key(name: &str) -> Vec<(u64, String)> {
+///
+/// A digit run is compared by its length and then its digits, with leading
+/// zeros dropped, so runs longer than a machine integer still order correctly
+/// instead of all reading as zero.
+fn natural_key(name: &str) -> Vec<(usize, String, String)> {
     let mut parts = Vec::new();
     let mut characters = name.chars().peekable();
     while characters.peek().is_some() {
@@ -168,7 +196,8 @@ fn natural_key(name: &str) -> Vec<(u64, String)> {
             std::iter::from_fn(|| characters.next_if(char::is_ascii_digit)).collect();
         let text: String =
             std::iter::from_fn(|| characters.next_if(|c| !c.is_ascii_digit())).collect();
-        parts.push((digits.parse::<u64>().unwrap_or(0), text.to_lowercase()));
+        let digits = digits.trim_start_matches('0').to_string();
+        parts.push((digits.len(), digits, text.to_lowercase()));
     }
     parts
 }
@@ -221,13 +250,15 @@ fn pending_files(watched: State<'_, Watched>) -> Vec<String> {
 
 /// Hand files to the window, however they arrived: a Finder double-click or
 /// `open -a pdf-next x.pdf` on macOS, or a second `pdf-next x.pdf` while the
-/// first is running. Live when the frontend is listening; otherwise the first
-/// becomes the launch file and the rest wait for `pending_files`.
+/// first is running. Live when the frontend is listening; otherwise every
+/// path waits for `pending_files`, and the first also becomes the launch file
+/// if there is none yet, so the watcher has something to follow. The frontend
+/// opens a path once however many times it hears it, so the overlap is free.
 fn deliver(app: &AppHandle, paths: Vec<PathBuf>) {
     let paths: Vec<String> = paths
         .into_iter()
         .filter_map(|path| std::fs::canonicalize(path).ok())
-        .map(|path| path.to_string_lossy().to_string())
+        .map(|path| display_path(&path))
         .collect();
     if paths.is_empty() {
         return;
@@ -240,9 +271,8 @@ fn deliver(app: &AppHandle, paths: Vec<PathBuf>) {
             return;
         };
         if !state.ready {
-            let mut paths = paths.iter();
             if state.path.is_none() {
-                if let Some(first) = paths.next() {
+                if let Some(first) = paths.first() {
                     drop(state);
                     let _ = adopt(&watched, PathBuf::from(first));
                     state = match watched.0.lock() {
@@ -251,7 +281,7 @@ fn deliver(app: &AppHandle, paths: Vec<PathBuf>) {
                     };
                 }
             }
-            state.pending.extend(paths.cloned());
+            state.pending.extend(paths.iter().cloned());
         }
         state.ready
     };
@@ -282,7 +312,30 @@ struct MarkdownDoc {
 /// the app origin — so scripts, event handlers and javascript: URLs must not
 /// survive, and they don't: ammonia strips everything outside its allowlist.
 /// Images are dropped too, deliberately: loading them would widen file access
-/// beyond the one file the reader opened.
+/// beyond the one file the reader opened. Relative links go the same way: a
+/// click on `[notes](other.md)` would be a top-level navigation inside the
+/// app origin, which the navigation guard allows, and the viewer would be
+/// replaced by a blank page with no way back. Absolute links stay, and are
+/// stopped by the guard when clicked.
+///
+/// Same-page links survive, because footnotes are made of them. Every id the
+/// document carries is prefixed so it cannot collide with the viewer's own
+/// elements, and fragment links are rewritten to match; the frontend scrolls
+/// to them rather than letting them navigate.
+const MARKDOWN_ID_PREFIX: &str = "md-";
+
+/// ammonia asks this about every relative URL. Only a fragment survives, and
+/// it is pointed at the prefixed id it will find in the cleaned document.
+fn keep_fragment_links(url: &str) -> Option<std::borrow::Cow<'_, str>> {
+    let fragment = url.strip_prefix('#')?;
+    if fragment.is_empty() {
+        return None;
+    }
+    Some(std::borrow::Cow::Owned(format!(
+        "#{MARKDOWN_ID_PREFIX}{fragment}"
+    )))
+}
+
 fn render_markdown(source: &str) -> String {
     use pulldown_cmark::{html, Options, Parser};
     let mut options = Options::empty();
@@ -296,6 +349,9 @@ fn render_markdown(source: &str) -> String {
 
     let mut builder = ammonia::Builder::default();
     builder.rm_tags(["img"]);
+    builder.add_generic_attributes(["id"]);
+    builder.id_prefix(Some(MARKDOWN_ID_PREFIX));
+    builder.url_relative(ammonia::UrlRelative::Custom(Box::new(keep_fragment_links)));
     // Task-list checkboxes; forms are inert anyway (form-action 'none').
     builder.add_tags(["input"]);
     builder.add_tag_attributes("input", ["type", "checked", "disabled"]);
@@ -575,46 +631,73 @@ async fn pick_file(app: AppHandle) -> Option<String> {
         .add_filter(
             "Documents and images",
             &[
-                "pdf", "md", "markdown", "png", "jpg", "jpeg", "webp", "avif",
+                "pdf", "md", "markdown", "png", "jpg", "jpeg", "webp", "avif", "gif", "bmp",
             ],
         )
         .blocking_pick_file()
         .map(|file| file.to_string())
 }
 
+/// Wait out one poll interval in IDLE_TICK steps, re-reading the cadence each
+/// step. A shorter interval chosen mid-wait cuts the wait short, and 0 holds
+/// here until watching is turned back on.
+fn wait_for_tick() {
+    let started = std::time::Instant::now();
+    loop {
+        let seconds = POLL_SECONDS.load(Ordering::Relaxed);
+        if seconds != 0 && started.elapsed() >= Duration::from_secs(seconds) {
+            return;
+        }
+        std::thread::sleep(IDLE_TICK);
+    }
+}
+
 /// One `stat` per second. Cheap enough to be invisible, fast enough that a
 /// recompile shows up before you look back at the window.
+///
+/// The lock is held only to read and write the snapshot, never across the
+/// disk: the doc protocol and every command take the same lock, and a stat on
+/// a slow volume must not stall a page fetch.
 fn spawn_watcher(app: AppHandle) {
     std::thread::spawn(move || loop {
-        let seconds = POLL_SECONDS.load(Ordering::Relaxed);
-        if seconds == 0 {
-            std::thread::sleep(IDLE_TICK);
-            continue;
-        }
-        std::thread::sleep(Duration::from_secs(seconds));
+        wait_for_tick();
 
         let Some(watched) = app.try_state::<Watched>() else {
             continue;
         };
-        let Ok(mut state) = watched.0.lock() else {
-            continue;
+        let snapshot = {
+            let Ok(state) = watched.0.lock() else {
+                continue;
+            };
+            state
+                .path
+                .clone()
+                .map(|path| (path, state.modified, state.len, state.missing))
         };
-        let Some(path) = state.path.clone() else {
+        let Some((path, recorded_modified, recorded_len, missing)) = snapshot else {
             continue;
         };
 
         match stat(&path) {
             Some((modified, len)) => {
-                let changed = modified != state.modified || len != state.len;
-                let reappeared = state.missing;
+                let changed = modified != recorded_modified || len != recorded_len;
+                let reappeared = missing;
                 if (changed || reappeared) && !is_complete(&path) {
                     // Still being written. Leave the recorded stat alone so the
                     // next tick sees it as a change again.
                     continue;
                 }
-                state.modified = modified;
-                state.len = len;
-                state.missing = false;
+                {
+                    let Ok(mut state) = watched.0.lock() else {
+                        continue;
+                    };
+                    if state.path.as_deref() != Some(path.as_path()) {
+                        continue; // the reader moved on while the disk answered
+                    }
+                    state.modified = modified;
+                    state.len = len;
+                    state.missing = false;
+                }
                 if changed || reappeared {
                     let revision = REVISION.fetch_add(1, Ordering::Relaxed) + 1;
                     let _ = app.emit(
@@ -628,16 +711,25 @@ fn spawn_watcher(app: AppHandle) {
             }
             None => {
                 // Mid-build gap. Report it once and keep the current render.
-                if !state.missing {
-                    state.missing = true;
-                    let _ = app.emit(
-                        "file-changed",
-                        WatchEvent {
-                            kind: "missing",
-                            revision: REVISION.load(Ordering::Relaxed),
-                        },
-                    );
+                if missing {
+                    continue;
                 }
+                {
+                    let Ok(mut state) = watched.0.lock() else {
+                        continue;
+                    };
+                    if state.path.as_deref() != Some(path.as_path()) {
+                        continue;
+                    }
+                    state.missing = true;
+                }
+                let _ = app.emit(
+                    "file-changed",
+                    WatchEvent {
+                        kind: "missing",
+                        revision: REVISION.load(Ordering::Relaxed),
+                    },
+                );
             }
         }
     });
@@ -806,7 +898,7 @@ fn open_print_dialog(webview: &tauri::Webview) -> Result<(), String> {
         None => Ok(()),
         Some(Trouble::Unsupported) => webview.print().map_err(|error| error.to_string()),
         Some(Trouble::Refused(message)) => Err(format!(
-            "Windows would not open the print dialog ({message}).              Is the Print Spooler service running?"
+            "Windows would not open the print dialog ({message}). Is the Print Spooler service running?"
         )),
     }
 }
@@ -848,7 +940,8 @@ flags
   -h, --help                         this text
   -V, --version                      the version
 
-exit status: 0 launched or already running, 1 a file was not found,
+exit status: 0 launched or already running, 1 a file was not found or is
+             not a kind pdf-next can show,
              2 the command line could not be understood.
 ";
 
@@ -929,6 +1022,9 @@ where
                 };
                 if !candidate.is_file() {
                     return Err((1, format!("no such file: {text}")));
+                }
+                if kind_for(&candidate) == "unknown" {
+                    return Err((1, format!("not a file pdf-next can show: {text}")));
                 }
                 invocation.files.push(candidate);
             }
@@ -1044,9 +1140,7 @@ fn main() {
     // than assume. Printed once, by the process the caller ran.
     for file in &invocation.files {
         let shown = std::fs::canonicalize(file).unwrap_or_else(|_| file.clone());
-        let shown = shown.to_string_lossy();
-        // Windows canonical paths carry a `\\?\` prefix no person types.
-        println!("opened {}", shown.strip_prefix(r"\\?\").unwrap_or(&shown));
+        println!("opened {}", display_path(&shown));
     }
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
@@ -1149,7 +1243,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{open_download, parse_cli, render_markdown, Cli};
+    use super::{natural_key, open_download, parse_cli, render_markdown, Cli};
     use std::ffi::OsString;
 
     fn cli(words: &[&str]) -> Result<Cli, (i32, String)> {
@@ -1180,6 +1274,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.pdf"), b"%PDF-1.7\n%%EOF\n").unwrap();
         std::fs::write(dir.join("b.md"), b"# hi\n").unwrap();
+        std::fs::write(dir.join("c.txt"), b"plain\n").unwrap();
+
+        // A file that exists but cannot be shown is answered, not swallowed.
+        let refused = parse_cli(["c.txt"].map(OsString::from), Some(&dir))
+            .err()
+            .unwrap();
+        assert_eq!(refused.0, 1);
+        assert!(refused.1.contains("c.txt"));
 
         let parsed = parse_cli(
             ["a.pdf", "--night", "b.md", "--wait", "-psn_0_1"].map(OsString::from),
@@ -1207,6 +1309,41 @@ mod tests {
         assert!(!html.contains("javascript:"));
         assert!(!html.contains("onclick"));
         assert!(!html.contains("onerror"));
+    }
+
+    #[test]
+    fn relative_links_do_not_survive() {
+        let html = render_markdown(
+            "[here](other.md) [site](https://example.com/x) note[^1]\n\n[^1]: the note",
+        );
+        assert!(!html.contains("other.md"));
+        assert!(html.contains("href=\"https://example.com/x\""));
+        // Footnotes keep working: the reference points at the prefixed id.
+        assert!(html.contains("href=\"#md-1\""), "{html}");
+        assert!(html.contains("id=\"md-1\""), "{html}");
+        assert!(!html.contains("id=\"1\""));
+    }
+
+    #[test]
+    fn windows_paths_are_shown_the_way_people_type_them() {
+        use super::display_path;
+        use std::path::Path;
+        assert_eq!(display_path(Path::new(r"\\?\C:\a\b.pdf")), r"C:\a\b.pdf");
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\b.pdf")),
+            r"\\server\share\b.pdf"
+        );
+        assert_eq!(display_path(Path::new("/home/x/b.pdf")), "/home/x/b.pdf");
+    }
+
+    #[test]
+    fn folders_sort_the_way_people_read_them() {
+        let mut names = vec!["fig10", "fig2", "fig1", "Fig02"];
+        names.sort_by_key(|name| natural_key(name));
+        assert_eq!(names, vec!["fig1", "fig2", "Fig02", "fig10"]);
+        let long = "1234567890123456789012345";
+        assert!(natural_key(long) > natural_key("999"));
+        assert!(natural_key(long) < natural_key("1234567890123456789012346"));
     }
 
     #[test]

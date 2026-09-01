@@ -34,6 +34,10 @@
       <symbol id="i-mode" viewBox="0 0 16 16" fill="none">
         <path d="M13 9.6A5.4 5.4 0 0 1 6.4 3 5.5 5.5 0 1 0 13 9.6Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
       </symbol>
+      <symbol id="i-rotate" viewBox="0 0 16 16" fill="none">
+        <path d="M13 8A5 5 0 1 1 9.8 3.35" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M9.5 1.5L12 3.5L9.5 5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </symbol>
       <symbol id="i-open" viewBox="0 0 16 16" fill="none">
         <path d="M2.5 12.5V4.5C2.5 3.95 2.95 3.5 3.5 3.5H6.5L8 5.5H12.5C13.05 5.5 13.5 5.95 13.5 6.5V12.5C13.5 13.05 13.05 13.5 12.5 13.5H3.5C2.95 13.5 2.5 13.05 2.5 12.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
       </symbol>
@@ -109,6 +113,9 @@
           <svg class="icon"><use href="#i-next"/></svg>
         </button>
         <span id="imageIndex" class="dim"></span>
+        <button id="rotate" type="button" title="Rotate a quarter turn clockwise" aria-label="Rotate a quarter turn clockwise" aria-pressed="false">
+          <svg class="icon"><use href="#i-rotate"/></svg>
+        </button>
       </div>
       <div class="sep image-only"></div>
       <div class="sep pdf-only"></div>
@@ -188,7 +195,12 @@
         <div id="viewer" class="pdfViewer"></div>
       </div>
       <div id="imageStage" hidden>
-        <img id="image" alt="" />
+        <!-- The box is the picture's place in the layout. Upright it simply
+             wraps the image; turned a quarter, script gives it the swapped
+             size and the image is rotated inside it. -->
+        <div id="imageBox">
+          <img id="image" alt="" />
+        </div>
       </div>
       <div id="markdownStage">
         <article id="markdown"></article>
