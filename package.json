@@ -1,6 +1,6 @@
 {
   "name": "pdf-next",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "description": "Tiny, fast PDF, image and markdown viewer that reloads when the file changes",
   "license": "MIT",

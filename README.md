@@ -77,6 +77,12 @@ that survives a build deleting and recreating the file mid-compile.
   cycles Clear → Night → Invert → Sepia, so plain white pages are always one press away;
   Shift+click it to jump straight back to Clear from anywhere.
 - **Text search** with match counts, powered by PDF.js.
+- **Opens at a page, or at a figure.** `--page 12`, `--find "Figure 3"` and `--dest results`
+  say where to land, and the same thing can be written on the path the way a PDF link is —
+  `paper.pdf#page=7&search=wake`. A file already open is aimed rather than opened twice, so a
+  running window jumps to the page you asked for; `--no-focus` hands a file over without
+  raising the window. The `opened` line prints the fragment that was understood, which is what
+  lets a script — or an agent — check rather than assume.
 - **Print with `Ctrl+P`**, to the system's own dialog — the real one, with your printer list,
   page range, copies, duplex, paper size and scaling. pdf-next adds no print settings of its
   own: it lays the document out for paper, then hands the window to macOS's print panel, the
@@ -86,7 +92,7 @@ that survives a build deleting and recreating the file mid-compile.
   sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
   same size follows the first one, as it does in every other viewer. If the machine has nothing
   to print to — no printer, or a stopped print service — it says so rather than opening nothing.
-- **The title says which build you are running** — `paper.pdf — pdf-next 0.8.0` — so a bug report
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.9.0` — so a bug report
   can name a version without hunting for an about box.
 - **Tells you when there is a newer version.** A few seconds after launch the app asks
   GitHub for the latest release, once; if it is newer, the last toolbar button lights up and a
@@ -125,6 +131,9 @@ pdf-next figure.png --invert             # inverted, for a white-background plot
 pdf-next thesis.pdf --sepia --poll 3     # warm paper, check for rebuilds every 3s
 pdf-next NOTES.md --sepia                # markdown as warm paper, reloading as you write
 pdf-next paper.pdf supp.pdf fig1.png     # three tabs, the first one showing
+pdf-next paper.pdf --page 12             # open at page 12
+pdf-next paper.pdf --find "Figure 3"     # open at the first match, highlighted
+pdf-next 'paper.pdf#page=7&search=wake'  # the same, written as a link
 ```
 
 | Flag | Effect |
@@ -137,6 +146,10 @@ pdf-next paper.pdf supp.pdf fig1.png     # three tabs, the first one showing
 | `--invert` | Invert the page, for scans and white-background figures. |
 | `--plain` / `--light` | Original page colors. |
 | `--mode <name>` | Same as the above, by name. |
+| `--page <n>` | Open at that page. |
+| `--find <text>` | Open at the first match, highlighted. |
+| `--dest <name>` | Open at a named destination. |
+| `--no-focus` | Hand the file over without raising the window. |
 | `--poll <seconds>` | Watch interval; `0` turns watching off. |
 | `--wait` | Stay attached to the terminal until the window closes (macOS and Linux — see below). |
 | `--help`, `--version` | Print and exit. |
@@ -157,6 +170,26 @@ pdf-next --help                # usage, exit 0
 pdf-next missing.pdf           # "pdf-next: no such file: missing.pdf", exit 1
 pdf-next --bogus               # "unknown flag --bogus (try --help)", exit 2
 ```
+
+**Pointing at a place in a document.** `--page 12`, `--find "Figure 3"` and `--dest intro`
+say where to land; the same thing can be written on the path as a fragment, in the form PDF
+links have always used — `paper.pdf#page=7`, `#nameddest=results`, `#search=Figure%203`,
+joined with `&`. Quote it: a shell reads `#` as the start of a comment. The `opened` line
+prints the fragment that was understood, so a caller can check rather than assume:
+
+```bash
+pdf-next 'paper.pdf#page=7&search=wake' --no-focus
+# opened /abs/path/paper.pdf#page=7&search=wake
+```
+
+A page past the end lands on the last page and says so. A `--find` with no match leaves the
+document where it was, with the find bar showing the query and no results. The three flags
+speak about the file named before them, or about the first file when they come first, so
+several documents can be aimed at in one command.
+
+If the file is already open in a tab, it is aimed rather than opened a second time — a
+running window jumps to the page you asked for. `--no-focus` hands the file over without
+raising the window, which is what you want when a script opens six figures in a row.
 
 Exit status is `0` when the file was launched or handed to the running window, `1` for a
 file that does not exist or is not a kind pdf-next can show, `2` for a command line it

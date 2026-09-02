@@ -313,8 +313,36 @@ assert.match(
 );
 assert.match(
   main,
-  /if !candidate\.is_file\(\) \{\s*return Err\(\(1, format!\("no such file: \{text\}"\)\)\);/,
+  /if !candidate\.is_file\(\) \{\s*return Err\(\(1, format!\("no such file: \{name\}"\)\)\);/,
   'A missing file must fail with exit status 1, not open an empty window.',
+);
+// Opening a document at a page or a match is what makes this usable from a
+// script: the flags, the link form of the same thing, and the printed line
+// that says which was understood.
+assert.match(
+  main,
+  /"--page" => match arguments[\s\S]*?"--find" \| "--search" =>[\s\S]*?"--dest" \| "--nameddest" =>/,
+  '--page, --find and --dest must all be accepted.',
+);
+assert.match(
+  main,
+  /"page" => target\.page[\s\S]*?"nameddest" \| "dest"[\s\S]*?"search" \| "find"/,
+  'A path fragment must be read with the field names PDF links use.',
+);
+assert.match(
+  main,
+  /if focus \{\s*if let Some\(window\) = app\.get_webview_window\("main"\)/,
+  '--no-focus must be able to hand a file over without raising the window.',
+);
+assert.match(
+  app,
+  /async function applyTarget\(target\)[\s\S]*?pdfViewer\.currentPageNumber = landed/,
+  'A target must land on its page once the document is up.',
+);
+assert.match(
+  app,
+  /async function consumeTarget\(tab\) \{[\s\S]*?tab\.target = null;\s*await applyTarget\(target\);/,
+  'A target fires once; afterwards the tab remembers its own view.',
 );
 assert.match(
   main,
@@ -328,8 +356,8 @@ assert.match(
 );
 assert.match(
   main,
-  /println!\("opened \{\}"/,
-  'Each opened file must be printed on stdout so a caller can verify.',
+  /println!\("opened \{\}\{separator\}\{fragment\}"/,
+  'Each opened file must be printed on stdout, with the fragment that was understood, so a caller can verify.',
 );
 assert.match(
   main,
@@ -338,7 +366,7 @@ assert.match(
 );
 assert.match(
   main,
-  /tauri::RunEvent::Opened \{ urls \}[\s\S]*?deliver\(app, files\)/,
+  /tauri::RunEvent::Opened \{ urls \}[\s\S]*?deliver\(app, files, true\)/,
   'macOS files arrive as an Opened event; without this arm a double-click opens nothing.',
 );
 assert.match(

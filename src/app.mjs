@@ -944,13 +944,84 @@ async function openFile(
   }
 }
 
-async function openPath(path, { activate = true } = {}) {
+async function openPath(path, { activate = true, target = null } = {}) {
   try {
     const file = await invoke('open_path', { path });
-    await openInTab(file, { activate });
+    await openInTab(file, { activate, target });
   } catch (error) {
     setStatus(String(error), { error: true, sticky: true });
   }
+}
+
+// ── Landing somewhere in particular ───────────────────────────────────────
+//
+// `pdf-next paper.pdf --page 12`, or the same written as a link,
+// `paper.pdf#page=12&search=Figure%203`. The fields are the ones PDF links
+// have used for years, so a reference that opens in a browser opens here.
+
+/// Keep only the fields that say something, and nothing at all if none do.
+/// Rust sends every field on every open, most of them null.
+function asTarget(value) {
+  if (!value) {
+    return null;
+  }
+  const page = Number.isFinite(value.page) && value.page >= 1 ? Math.round(value.page) : null;
+  const nameddest = value.nameddest || null;
+  const search = value.search || null;
+  return page || nameddest || search ? { page, nameddest, search } : null;
+}
+
+/// A file to open, however it arrived: a bare path from a drop or an Apple
+/// Event, or a path with a target from the command line.
+function asOpening(value) {
+  if (typeof value === 'string') {
+    return { path: value, target: null };
+  }
+  const path = value?.path;
+  return typeof path === 'string' ? { path, target: asTarget(value.target) } : null;
+}
+
+/// Land where the caller asked. Called once the document is up, because a page
+/// number means nothing to PDF.js before there are pages, and because a search
+/// runs from the page you are on — so `#page=5&search=Figure` finds the first
+/// "Figure" at or after page 5.
+async function applyTarget(target) {
+  if (!target || state.file?.kind !== 'pdf' || !state.document) {
+    return;
+  }
+  if (target.nameddest) {
+    try {
+      await linkService.goToDestination(target.nameddest);
+    } catch {
+      setStatus(`No destination named ${target.nameddest}`, { error: true });
+    }
+  }
+  if (target.page) {
+    const landed = Math.min(target.page, pdfViewer.pagesCount || 1);
+    pdfViewer.currentPageNumber = landed;
+    if (landed !== target.page) {
+      setStatus(`Page ${target.page} is past the end — showing ${landed}`);
+    }
+  }
+  if (target.search) {
+    // The find bar opens showing what was asked for, and keeps the count, but
+    // does not take the keyboard: the reader is here to read.
+    ui.findInput.value = target.search;
+    ui.find.hidden = false;
+    runFind();
+  }
+  updatePageControls();
+}
+
+/// A target is an instruction, not a property of the tab: it fires once, and
+/// afterwards the tab remembers the place you left it like any other.
+async function consumeTarget(tab) {
+  const target = tab?.target;
+  if (!target) {
+    return;
+  }
+  tab.target = null;
+  await applyTarget(target);
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────
@@ -1027,15 +1098,24 @@ function renderTabs() {
 /// `activate: false` adds the tab and loads nothing: ten files dropped at once
 /// cost one parse, not ten, and the one you are looking at stays put. A file
 /// already open is left alone in that case.
-async function openInTab(file, { activate = true } = {}) {
+async function openInTab(file, { activate = true, target = null } = {}) {
   const existing = state.tabs.findIndex((tab) => tab.path === file.path);
   if (existing >= 0) {
+    // A file that is already open is aimed rather than opened twice: a second
+    // `pdf-next paper.pdf --page 12` moves the tab you are reading. If it is a
+    // background tab, the target waits there until you switch to it.
+    if (target) {
+      state.tabs[existing].target = target;
+    }
     if (activate) {
       await activateTab(existing, { force: true });
+    } else if (existing === state.active) {
+      // Already the one showing: aim it where it stands, without a re-parse.
+      await consumeTarget(state.tabs[existing]);
     }
     return;
   }
-  const entry = { path: file.path, name: file.name, kind: file.kind };
+  const entry = { path: file.path, name: file.name, kind: file.kind, target };
   if (!activate) {
     // Appended, not inserted next to the active tab: files that arrive
     // together must keep the order they arrived in.
@@ -1049,6 +1129,7 @@ async function openInTab(file, { activate = true } = {}) {
   state.active = at;
   renderTabs();
   await openFile(file);
+  await consumeTarget(entry);
 }
 
 /// Park the outgoing file's page, zoom and scroll so the tab comes back to the
@@ -1081,6 +1162,9 @@ async function activateTab(index, { force = false } = {}) {
       keepWindow: true,
       view: state.views.get(tab.path) || null,
     });
+    // After the remembered view, not before: an explicit page wins over where
+    // this tab was last left.
+    await consumeTarget(tab);
   } catch (error) {
     setStatus(String(error), { error: true, sticky: true });
   }
@@ -2075,16 +2159,17 @@ window.addEventListener('keydown', (event) => {
 // Finder, or handed over by a second `pdf-next file.pdf` while this one runs.
 // Several at once open as tabs, and the first one is the one you end up
 // looking at.
-async function openMany(paths) {
-  const [first, ...rest] = paths;
+async function openMany(items) {
+  const [first, ...rest] = items.map(asOpening).filter(Boolean);
   if (first === undefined) {
     return;
   }
-  await openPath(first);
+  await openPath(first.path, { target: first.target });
   // The rest become tabs and nothing more: a tab is read from disk when it is
-  // switched to, so loading it now would be a parse nobody sees.
-  for (const path of rest) {
-    await openPath(path, { activate: false });
+  // switched to, so loading it now would be a parse nobody sees. A target
+  // travels with the tab and fires when you get there.
+  for (const item of rest) {
+    await openPath(item.path, { activate: false, target: item.target });
   }
 }
 
@@ -2208,12 +2293,15 @@ const initial = await invoke('initial_file');
 await openFilesReady;
 const pending = await invoke('pending_files').catch(() => []);
 if (initial) {
-  await openInTab(initial);
+  await openInTab(initial, { target: asTarget(launch?.target) });
   // Extra paths on the command line become tabs; the first one stays showing.
   // The launch file may be queued again among the pending ones; openInTab
   // knows it already and leaves it alone.
-  for (const path of [...(launch?.rest || []), ...pending]) {
-    await openPath(path, { activate: false });
+  for (const item of [...(launch?.rest || []), ...pending]) {
+    const opening = asOpening(item);
+    if (opening) {
+      await openPath(opening.path, { activate: false, target: opening.target });
+    }
   }
   if (['left', 'right', 'top', 'bottom'].includes(launch?.dock)) {
     await dockTo(launch.dock);

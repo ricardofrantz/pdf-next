@@ -42,7 +42,7 @@ struct WatchState {
     /// double-click on macOS, or a second `pdf-next` run — waiting to be
     /// collected by `pending_files`. Once `ready` is set they are emitted
     /// live instead.
-    pending: Vec<String>,
+    pending: Vec<Opening>,
     ready: bool,
 }
 
@@ -65,6 +65,95 @@ struct FileInfo {
 struct WatchEvent {
     kind: &'static str,
     revision: u64,
+}
+
+/// Where in a document to land: the fragment on a path
+/// (`paper.pdf#page=12&search=Figure%203`), or the flags that say the same
+/// thing. The field names are the ones RFC 8118 defines for PDF links, so a
+/// reference that works in a browser works here too. A key this viewer has no
+/// answer for — `zoom`, `view`, `viewrect` — is dropped rather than refused,
+/// because a fragment is a hint and the file still opens without it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+struct Target {
+    page: Option<u32>,
+    nameddest: Option<String>,
+    search: Option<String>,
+}
+
+/// What has to survive a round trip through a fragment. The others are
+/// percent-encoded on the way out so the printed reference can be pasted back
+/// in unchanged.
+const FRAGMENT_ESCAPES: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'<')
+    .add(b'>');
+
+impl Target {
+    /// The fragment this target amounts to, rebuilt. It goes on the `opened`
+    /// line so a caller reads back what was understood instead of assuming.
+    fn fragment(&self) -> String {
+        let mut fields: Vec<String> = Vec::new();
+        if let Some(page) = self.page {
+            fields.push(format!("page={page}"));
+        }
+        if let Some(destination) = &self.nameddest {
+            fields.push(format!("nameddest={}", escape_fragment(destination)));
+        }
+        if let Some(search) = &self.search {
+            fields.push(format!("search={}", escape_fragment(search)));
+        }
+        fields.join("&")
+    }
+
+    /// Let a more specific target win field by field. A fragment written on
+    /// the path speaks about that one file, so it overrides a flag that was
+    /// aimed at whichever file came next.
+    fn overridden_by(&mut self, other: Target) {
+        if other.page.is_some() {
+            self.page = other.page;
+        }
+        if other.nameddest.is_some() {
+            self.nameddest = other.nameddest;
+        }
+        if other.search.is_some() {
+            self.search = other.search;
+        }
+    }
+}
+
+fn escape_fragment(text: &str) -> String {
+    percent_encoding::utf8_percent_encode(text, FRAGMENT_ESCAPES).to_string()
+}
+
+/// Read `page=12&search=Figure%203`.
+fn parse_fragment(fragment: &str) -> Target {
+    let mut target = Target::default();
+    for field in fragment.split('&').filter(|field| !field.is_empty()) {
+        let (key, value) = field.split_once('=').unwrap_or((field, ""));
+        let value = percent_encoding::percent_decode_str(value)
+            .decode_utf8_lossy()
+            .to_string();
+        match key.to_ascii_lowercase().as_str() {
+            "page" => target.page = value.parse().ok().filter(|page| *page >= 1),
+            "nameddest" | "dest" if !value.is_empty() => target.nameddest = Some(value),
+            "search" | "find" if !value.is_empty() => target.search = Some(value),
+            _ => {}
+        }
+    }
+    target
+}
+
+/// One file to open, and where in it. Every route into the window — the launch
+/// arguments, a second `pdf-next` run, a Finder double-click, a drop — hands
+/// the frontend this shape.
+#[derive(Clone, Debug, Serialize)]
+struct Opening {
+    path: String,
+    target: Target,
 }
 
 fn kind_for(path: &Path) -> &'static str {
@@ -240,7 +329,7 @@ fn initial_file(watched: State<'_, Watched>) -> Option<FileInfo> {
 /// also marks the frontend ready, so anything that arrives afterwards comes as
 /// an `open-files` event instead.
 #[tauri::command]
-fn pending_files(watched: State<'_, Watched>) -> Vec<String> {
+fn pending_files(watched: State<'_, Watched>) -> Vec<Opening> {
     let Ok(mut state) = watched.0.lock() else {
         return Vec::new();
     };
@@ -254,13 +343,22 @@ fn pending_files(watched: State<'_, Watched>) -> Vec<String> {
 /// path waits for `pending_files`, and the first also becomes the launch file
 /// if there is none yet, so the watcher has something to follow. The frontend
 /// opens a path once however many times it hears it, so the overlap is free.
-fn deliver(app: &AppHandle, paths: Vec<PathBuf>) {
-    let paths: Vec<String> = paths
+///
+/// `focus` is what `--no-focus` turns off. A person handing over a file wants
+/// the window; a script opening six figures in a row does not want the desktop
+/// yanked six times, and the tabs are there when they look.
+fn deliver(app: &AppHandle, files: Vec<(PathBuf, Target)>, focus: bool) {
+    let openings: Vec<Opening> = files
         .into_iter()
-        .filter_map(|path| std::fs::canonicalize(path).ok())
-        .map(|path| display_path(&path))
+        .filter_map(|(path, target)| {
+            let path = std::fs::canonicalize(path).ok()?;
+            Some(Opening {
+                path: display_path(&path),
+                target,
+            })
+        })
         .collect();
-    if paths.is_empty() {
+    if openings.is_empty() {
         return;
     }
     let Some(watched) = app.try_state::<Watched>() else {
@@ -272,25 +370,28 @@ fn deliver(app: &AppHandle, paths: Vec<PathBuf>) {
         };
         if !state.ready {
             if state.path.is_none() {
-                if let Some(first) = paths.first() {
+                if let Some(first) = openings.first() {
+                    let path = PathBuf::from(&first.path);
                     drop(state);
-                    let _ = adopt(&watched, PathBuf::from(first));
+                    let _ = adopt(&watched, path);
                     state = match watched.0.lock() {
                         Ok(state) => state,
                         Err(_) => return,
                     };
                 }
             }
-            state.pending.extend(paths.iter().cloned());
+            state.pending.extend(openings.iter().cloned());
         }
         state.ready
     };
     if ready {
-        let _ = app.emit("open-files", &paths);
+        let _ = app.emit("open-files", &openings);
     }
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+    if focus {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
     }
 }
 
@@ -925,9 +1026,11 @@ struct Launch {
     /// Which screen half to fill, if any: left, right, top or bottom.
     dock: Option<String>,
     poll: Option<u64>,
+    /// Where to land in the launch file, if the command line said.
+    target: Target,
     /// Everything after the first file, for the frontend to open as tabs. The
     /// first one is adopted here, because it is what the watcher follows.
-    rest: Vec<String>,
+    rest: Vec<Opening>,
     /// This build, for the update check: the version it compares against and
     /// the platform whose installer it should offer.
     version: String,
@@ -1122,16 +1225,32 @@ usage: pdf-next [files...] [flags]
   pdf-next paper.pdf --night --left        dark pages, filling the left half
   pdf-next NOTES.md --sepia --poll 3       markdown as warm paper, checked every 3s
   pdf-next paper.pdf supp.pdf fig1.png     three tabs, the first one showing
+  pdf-next paper.pdf --page 12             open at page 12
+  pdf-next paper.pdf --find \"Figure 3\"     open at the first match, highlighted
+  pdf-next 'paper.pdf#page=7&search=wake'  the same, written as a link
 
 files   .pdf  .png .jpg .jpeg .webp .avif .gif .bmp  .md .markdown
+        A file may carry a fragment saying where to land in it, in the form
+        PDF links use: page=N, nameddest=NAME, search=TEXT, joined by &, with
+        spaces written %20. Quote it — a shell reads # as a comment.
         If pdf-next is already running, the files open there as new tabs and
-        this command returns at once. Each file opened is printed on stdout.
+        this command returns at once. A file that is already a tab is aimed at
+        that page rather than opened twice. Each file opened is printed on
+        stdout, with the fragment that was understood.
 
 flags
   --left, --right, --top, --bottom   dock to that half of the screen
   --night, --sepia, --invert, --plain
                                      page appearance for this window only
   --mode <night|sepia|invert|clear>  the same, by name
+  --page <n>                         open at that page
+  --find <text>                      open at the first match, highlighted
+  --dest <name>                      open at a named destination
+                                     These three speak about the file named
+                                     before them, or the first one when they
+                                     come first.
+  --no-focus                         hand the file over without raising the
+                                     window
   --poll <seconds>                   watch interval; 0 turns watching off
   --wait                             stay attached to the terminal until the
                                      window closes (macOS and Linux; by default
@@ -1148,16 +1267,43 @@ exit status: 0 launched or already running, 1 a file was not found or is
 enum Cli {
     Help,
     Version,
-    Run(Invocation),
+    // Boxed: a run carries the whole command line, and every `--help` would
+    // otherwise pay for that much stack.
+    Run(Box<Invocation>),
 }
 
 /// A launch: files to open (the first is the one the watcher follows), how the
 /// window should come up, and whether to hold the terminal.
 #[derive(Default)]
 struct Invocation {
-    files: Vec<PathBuf>,
+    files: Vec<(PathBuf, Target)>,
     launch: Launch,
     wait: bool,
+    /// Set by `--no-focus`: open the file, leave the window where it is.
+    no_focus: bool,
+    /// A `--page`/`--find`/`--dest` that arrived before any file, waiting for
+    /// the one it speaks about.
+    carry: Target,
+}
+
+/// Which target a `--page`, `--find` or `--dest` is about: the file named
+/// before it, or — when the flags come first — the one named next. Both orders
+/// are natural to type, so both mean the same thing.
+fn aimed_at(invocation: &mut Invocation) -> &mut Target {
+    match invocation.files.last_mut() {
+        Some((_, target)) => target,
+        None => &mut invocation.carry,
+    }
+}
+
+/// Resolve one argument the way the caller meant it, against the directory the
+/// caller was in — which is not this process's own when a second instance
+/// forwards its arguments.
+fn against(path: PathBuf, cwd: Option<&Path>) -> PathBuf {
+    match (path.is_absolute(), cwd) {
+        (false, Some(cwd)) => cwd.join(path),
+        _ => path,
+    }
 }
 
 /// `pdf-next paper.pdf figure.png --night --left --poll 2`
@@ -1208,29 +1354,66 @@ where
                 Some(seconds) => invocation.launch.poll = Some(seconds),
                 None => return Err((2, "--poll needs a whole number of seconds".into())),
             },
+            "--page" => match arguments
+                .next()
+                .and_then(|value| value.to_string_lossy().parse::<u32>().ok())
+                .filter(|page| *page >= 1)
+            {
+                Some(page) => aimed_at(&mut invocation).page = Some(page),
+                None => return Err((2, "--page needs a page number, counting from 1".into())),
+            },
+            "--find" | "--search" => match arguments.next() {
+                Some(value) if !value.is_empty() => {
+                    aimed_at(&mut invocation).search = Some(value.to_string_lossy().to_string())
+                }
+                _ => return Err((2, "--find needs the text to look for".into())),
+            },
+            "--dest" | "--nameddest" => match arguments.next() {
+                Some(value) if !value.is_empty() => {
+                    aimed_at(&mut invocation).nameddest = Some(value.to_string_lossy().to_string())
+                }
+                _ => return Err((2, "--dest needs the name of a destination".into())),
+            },
+            "--no-focus" | "--background" => invocation.no_focus = true,
             // macOS used to pass a process serial number to launched apps.
             _ if text.starts_with("-psn_") => {}
             _ if text.starts_with('-') && text.len() > 1 => {
                 return Err((2, format!("unknown flag {text} (try --help)")));
             }
             _ => {
-                let given = PathBuf::from(&argument);
-                let candidate = match (given.is_absolute(), cwd) {
-                    (false, Some(cwd)) => cwd.join(&given),
-                    _ => given,
+                // `paper.pdf#page=12` is a path and a fragment — but only if
+                // the part before the `#` is a file. A file whose name really
+                // contains a `#` keeps its whole name, and keeps its OsString
+                // too, which a lossy split would have flattened.
+                let split = text.split_once('#').filter(|(before, _)| {
+                    !before.is_empty() && against(PathBuf::from(before), cwd).is_file()
+                });
+                let (name, candidate, fragment) = match split {
+                    Some((before, fragment)) => (
+                        before.to_string(),
+                        against(PathBuf::from(before), cwd),
+                        parse_fragment(fragment),
+                    ),
+                    None => (
+                        text.clone(),
+                        against(PathBuf::from(&argument), cwd),
+                        Target::default(),
+                    ),
                 };
                 if !candidate.is_file() {
-                    return Err((1, format!("no such file: {text}")));
+                    return Err((1, format!("no such file: {name}")));
                 }
                 if kind_for(&candidate) == "unknown" {
-                    return Err((1, format!("not a file pdf-next can show: {text}")));
+                    return Err((1, format!("not a file pdf-next can show: {name}")));
                 }
-                invocation.files.push(candidate);
+                let mut target = std::mem::take(&mut invocation.carry);
+                target.overridden_by(fragment);
+                invocation.files.push((candidate, target));
             }
         }
     }
 
-    Ok(Cli::Run(invocation))
+    Ok(Cli::Run(Box::new(invocation)))
 }
 
 /// Was this process started by LaunchServices — Finder, the Dock, `open`?
@@ -1328,7 +1511,7 @@ fn main() {
             println!("pdf-next {VERSION}");
             return;
         }
-        Ok(Cli::Run(invocation)) => invocation,
+        Ok(Cli::Run(invocation)) => *invocation,
         Err((status, message)) => {
             eprintln!("pdf-next: {message}");
             std::process::exit(status);
@@ -1337,9 +1520,11 @@ fn main() {
 
     // Say what happened, in canonical form, so a caller can verify rather
     // than assume. Printed once, by the process the caller ran.
-    for file in &invocation.files {
+    for (file, target) in &invocation.files {
         let shown = std::fs::canonicalize(file).unwrap_or_else(|_| file.clone());
-        println!("opened {}", display_path(&shown));
+        let fragment = target.fragment();
+        let separator = if fragment.is_empty() { "" } else { "#" };
+        println!("opened {}{separator}{fragment}", display_path(&shown));
     }
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
@@ -1362,8 +1547,14 @@ fn main() {
     let mut files = files.into_iter();
     let first = files.next();
     launch.rest = files
-        .map(|path| path.to_string_lossy().to_string())
+        .map(|(path, target)| Opening {
+            path: path.to_string_lossy().to_string(),
+            target,
+        })
         .collect();
+    if let Some((_, target)) = &first {
+        launch.target = target.clone();
+    }
     launch.version = VERSION.to_string();
     launch.platform = std::env::consts::OS.to_string();
 
@@ -1373,11 +1564,11 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             let cwd = PathBuf::from(cwd);
             let arguments = argv.into_iter().skip(1).map(std::ffi::OsString::from);
-            let files = match parse_cli(arguments, Some(&cwd)) {
-                Ok(Cli::Run(invocation)) => invocation.files,
-                _ => Vec::new(),
+            let (files, focus) = match parse_cli(arguments, Some(&cwd)) {
+                Ok(Cli::Run(invocation)) => (invocation.files, !invocation.no_focus),
+                _ => (Vec::new(), true),
             };
-            deliver(app, files);
+            deliver(app, files, focus);
         }))
         .plugin(navigation_guard())
         .plugin(tauri_plugin_dialog::init())
@@ -1408,7 +1599,7 @@ fn main() {
                 POLL_SECONDS.store(seconds.min(60), Ordering::Relaxed);
             }
             app.manage(launch);
-            if let Some(path) = first {
+            if let Some((path, _)) = first {
                 let _ = adopt(&app.state::<Watched>(), path);
             }
             if let Some(window) = app.get_webview_window("main") {
@@ -1433,8 +1624,9 @@ fn main() {
                 let files = urls
                     .iter()
                     .filter_map(|url| url.to_file_path().ok())
+                    .map(|path| (path, Target::default()))
                     .collect();
-                deliver(app, files);
+                deliver(app, files, true);
             }
             #[cfg(not(target_os = "macos"))]
             let _ = (app, event);
@@ -1443,7 +1635,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{natural_key, open_download, open_link, parse_cli, render_markdown, Cli};
+    use super::{natural_key, open_download, open_link, parse_cli, render_markdown, Cli, Target};
     use std::ffi::OsString;
 
     fn cli(words: &[&str]) -> Result<Cli, (i32, String)> {
@@ -1490,9 +1682,62 @@ mod tests {
         let Ok(Cli::Run(invocation)) = parsed else {
             panic!("expected a run");
         };
-        assert_eq!(invocation.files, vec![dir.join("a.pdf"), dir.join("b.md")]);
+        assert_eq!(
+            invocation.files,
+            vec![
+                (dir.join("a.pdf"), Target::default()),
+                (dir.join("b.md"), Target::default()),
+            ]
+        );
         assert_eq!(invocation.launch.mode.as_deref(), Some("night"));
         assert!(invocation.wait);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_page_can_be_asked_for_by_flag_or_by_fragment() {
+        let dir = std::env::temp_dir().join(format!("pdf-next-aim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.pdf"), b"%PDF-1.7\n%%EOF\n").unwrap();
+        std::fs::write(dir.join("b.pdf"), b"%PDF-1.7\n%%EOF\n").unwrap();
+        // A name that really contains a `#` keeps all of it.
+        std::fs::write(dir.join("odd#name.pdf"), b"%PDF-1.7\n%%EOF\n").unwrap();
+
+        let aim = |words: &[&str]| {
+            let parsed = parse_cli(words.iter().map(OsString::from), Some(&dir));
+            let Ok(Cli::Run(invocation)) = parsed else {
+                panic!("expected a run");
+            };
+            invocation
+        };
+
+        // A flag speaks about the file before it, and about the next one when
+        // it comes first.
+        let before = aim(&["a.pdf", "--page", "12", "b.pdf", "--find", "wake"]);
+        assert_eq!(before.files[0].1.page, Some(12));
+        assert_eq!(before.files[1].1.search.as_deref(), Some("wake"));
+        assert_eq!(before.files[0].1.search, None);
+        let after = aim(&["--page", "3", "a.pdf"]);
+        assert_eq!(after.files[0].1.page, Some(3));
+
+        // The fragment is the RFC 8118 one, spaces and all, and it wins over a
+        // flag aimed at the same file.
+        let linked = aim(&["--page", "3", "a.pdf#page=7&search=Figure%203&zoom=150"]);
+        let target = &linked.files[0].1;
+        assert_eq!(target.page, Some(7));
+        assert_eq!(target.search.as_deref(), Some("Figure 3"));
+        assert_eq!(target.fragment(), "page=7&search=Figure%203");
+        assert_eq!(linked.files[0].0, dir.join("a.pdf"));
+
+        let odd = aim(&["odd#name.pdf"]);
+        assert_eq!(odd.files[0].0, dir.join("odd#name.pdf"));
+        assert_eq!(odd.files[0].1, Target::default());
+
+        assert!(!aim(&["a.pdf"]).no_focus);
+        assert!(aim(&["a.pdf", "--no-focus"]).no_focus);
+        assert_eq!(cli(&["--page", "0"]).err().map(|e| e.0), Some(2));
+        assert_eq!(cli(&["--find"]).err().map(|e| e.0), Some(2));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
