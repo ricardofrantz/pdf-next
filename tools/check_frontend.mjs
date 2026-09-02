@@ -510,6 +510,44 @@ for (const option of ['cMapUrl', 'standardFontDataUrl', 'wasmUrl', 'iccUrl']) {
   );
 }
 
+// Markdown equations: TeX becomes MathML on the Rust side and goes through
+// the same sanitizer as the rest of the document, never around it.
+assert.match(main, /options\.insert\(Options::ENABLE_MATH\);/, 'Math must be enabled in pulldown-cmark.');
+assert.match(
+  main,
+  /builder\.add_tags\(MATHML_TAGS\);[\s\S]*?builder\.attribute_filter\(keep_known_styles\);[\s\S]*?builder\.clean\(&rendered\)/,
+  'MathML must be allowlisted in ammonia and cleaned with the document, not spliced in after.',
+);
+assert.match(
+  main,
+  /annotation: None|\.\.RenderConfig::default\(\)/,
+  'No TeX annotation: the renderer writes it unescaped.',
+);
+const indexHtml = await readFile('src/index.html', 'utf8');
+assert.match(
+  indexHtml,
+  /<link rel="stylesheet" href="\.\/vendor\/pulldown-latex\/styles\.css" \/>/,
+  'The math stylesheet (font faces for Latin Modern) must be linked.',
+);
+for (const file of ['styles.css', 'font/latinmodern-math.woff2', 'font/lmroman12-regular.woff2']) {
+  await assert.doesNotReject(access(`src/vendor/pulldown-latex/${file}`), `${file} must be vendored.`);
+}
+
+// Markdown links: nothing navigates the webview. Same-page links scroll, web
+// links go to the system browser through a command that takes http(s) and
+// mailto only, and relative links open as tabs.
+assert.match(
+  app,
+  /if \(\/\^\(https\?:\|mailto:\)\/i\.test\(href\)\) \{[\s\S]*?invoke\('open_link', \{ url: href \}\)/,
+  'Web links in markdown must go through open_link.',
+);
+assert.match(
+  main,
+  /fn open_link\(url: String\)[\s\S]*?starts_with\("http:\/\/"\)[\s\S]*?starts_with\("https:\/\/"\)[\s\S]*?starts_with\("mailto:"\)[\s\S]*?return Err/,
+  'open_link must refuse every scheme but http, https and mailto.',
+);
+assert.match(app, /const target = siblingPath\(href\);\s*if \(target\) \{\s*void openPath\(target\);/, 'Relative markdown links open as tabs.');
+
 // The README must name the runtime it actually ships.
 const vendored = version.match(/Version:\s*(\S+)/)?.[1];
 assert.ok(vendored, 'src/vendor/PDFJS_VERSION must record a version.');

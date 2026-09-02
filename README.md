@@ -63,6 +63,14 @@ that survives a build deleting and recreating the file mid-compile.
   so a hostile file cannot script anything. `Ctrl+U` (or the toolbar button) flips to the raw
   text and back; zoom reflows the text rather than scaling a bitmap. Edit the file and the
   view reloads within a second, keeping your scroll position — the same watch loop as PDFs.
+- **Equations, typeset.** `$…$` and `$$…$$` are TeX, turned into MathML by
+  [pulldown-latex](https://github.com/carloskiki/pulldown-latex) in the same Rust pass and set
+  in Latin Modern — no JavaScript math engine, nothing fetched, and the MathML meets the same
+  sanitizer as the prose.
+- **Links go where you would expect.** A `#heading` or footnote scrolls; a web link opens in
+  your browser; a relative link — `[notes](other.md)`, `[fig](fig1.png)`, the paper it
+  cites — opens as a new tab, if it is a kind pdf-next shows. Nothing ever navigates the
+  viewer itself.
   Local images referenced by the file are deliberately not loaded: the viewer reads exactly
   the files you opened, nothing next to them.
 - **Follows your system dark mode**, and can recolour PDF pages themselves. The mode button
@@ -78,7 +86,7 @@ that survives a build deleting and recreating the file mid-compile.
   sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
   same size follows the first one, as it does in every other viewer. If the machine has nothing
   to print to — no printer, or a stopped print service — it says so rather than opening nothing.
-- **The title says which build you are running** — `paper.pdf — pdf-next 0.7.2` — so a bug report
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.8.0` — so a bug report
   can name a version without hunting for an about box.
 - **Tells you when there is a newer version.** A few seconds after launch the app asks
   GitHub for the latest release, once; if it is newer, the last toolbar button lights up and a

@@ -1767,18 +1767,53 @@ ui.markdown.addEventListener('click', (event) => {
   }
   event.preventDefault();
   const href = anchor.getAttribute('href') || '';
-  if (!href.startsWith('#') || href.length < 2) {
+  if (href.startsWith('#')) {
+    // Same page: footnotes, and links to headings.
+    let id;
+    try {
+      id = decodeURIComponent(href.slice(1));
+    } catch {
+      return;
+    }
+    const target = id && ui.markdown.querySelector(`[id="${CSS.escape(id)}"]`);
+    target?.scrollIntoView({ block: 'start' });
     return;
   }
-  let id;
-  try {
-    id = decodeURIComponent(href.slice(1));
-  } catch {
+  if (/^(https?:|mailto:)/i.test(href)) {
+    // The web: the system browser's, never this window's.
+    void invoke('open_link', { url: href }).catch((error) => {
+      setStatus(String(error), { error: true });
+    });
     return;
   }
-  const target = ui.markdown.querySelector(`[id="${CSS.escape(id)}"]`);
-  target?.scrollIntoView({ block: 'start' });
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
+    return;
+  }
+  // A path next to this file: another note, a figure, the paper it cites.
+  // Opened as a tab when it is a kind pdf-next shows; the backend says so
+  // otherwise.
+  const target = siblingPath(href);
+  if (target) {
+    void openPath(target);
+  }
 });
+
+/** A relative link, resolved against the folder of the file being read. */
+function siblingPath(href) {
+  const bare = href.split(/[?#]/, 1)[0];
+  let relative;
+  try {
+    relative = decodeURIComponent(bare);
+  } catch {
+    return null;
+  }
+  const from = state.file?.path;
+  if (!relative || !from) {
+    return null;
+  }
+  const cut = Math.max(from.lastIndexOf('/'), from.lastIndexOf('\\'));
+  return from.slice(0, cut + 1) + relative;
+}
 for (const [edge, button] of Object.entries(ui.dockButtons)) {
   button.addEventListener('click', () => dockTo(edge));
 }

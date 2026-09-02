@@ -915,3 +915,73 @@ body.mode-sepia #markdownStage {
     break-inside: avoid;
   }
 }
+
+/* ── Markdown: equations, footnotes, task lists ──────────────────────── */
+/* The math font is the vendored Latin Modern (pulldown-latex's stylesheet
+   declares it); a system math font stands in until it loads. */
+#markdown math {
+  font-family: "Latin Modern Math", "STIX Two Math", "Cambria Math", math, serif;
+  font-size: 1.05em;
+}
+
+/* `display: block` alone would turn MathML layout off; `block math` keeps it.
+   The margin and the scroll are what a wide equation on a narrow page needs. */
+#markdown math[display='block'] {
+  display: block math;
+  margin: 0.9em auto;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+#markdown p:has(> math[display='block']:only-child) {
+  margin: 0.9em 0;
+}
+
+#markdown .footnote-definition {
+  display: flex;
+  gap: 0.6em;
+  margin: 0.4em 0;
+  font-size: 0.9em;
+  color: var(--md-dim);
+}
+
+#markdown .footnote-definition p {
+  margin: 0;
+}
+
+#markdown .footnote-definition-label,
+#markdown .footnote-reference {
+  color: var(--md-accent);
+}
+
+#markdown .footnote-definition + :not(.footnote-definition),
+#markdown :not(.footnote-definition) + .footnote-definition {
+  margin-top: 1.4em;
+}
+
+#markdown li:has(> input[type='checkbox']:first-child) {
+  list-style: none;
+  margin-left: -1.3em;
+}
+
+#markdown input[type='checkbox'] {
+  vertical-align: -0.1em;
+}
+
+#markdown th {
+  font-weight: 600;
+}
+
+#markdown tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--md-code-bg) 50%, transparent);
+}
+
+#markdown a[href^='http']::after,
+#markdown a[href^='HTTP']::after {
+  content: '\2197';
+  margin-left: 0.15em;
+  font-size: 0.75em;
+  vertical-align: 0.15em;
+  opacity: 0.7;
+}

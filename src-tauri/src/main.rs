@@ -324,10 +324,15 @@ struct MarkdownDoc {
 /// to them rather than letting them navigate.
 const MARKDOWN_ID_PREFIX: &str = "md-";
 
-/// ammonia asks this about every relative URL. Only a fragment survives, and
-/// it is pointed at the prefixed id it will find in the cleaned document.
-fn keep_fragment_links(url: &str) -> Option<std::borrow::Cow<'_, str>> {
-    let fragment = url.strip_prefix('#')?;
+/// ammonia asks this about every relative URL. A fragment is pointed at the
+/// prefixed id it will find in the cleaned document; any other relative path
+/// is kept as written, for the frontend to resolve against the file's own
+/// folder and open as a tab. Nothing here navigates: the click handler
+/// intercepts every link, and the webview's navigation guard sits behind it.
+fn keep_local_links(url: &str) -> Option<std::borrow::Cow<'_, str>> {
+    let Some(fragment) = url.strip_prefix('#') else {
+        return Some(std::borrow::Cow::Borrowed(url));
+    };
     if fragment.is_empty() {
         return None;
     }
@@ -336,25 +341,203 @@ fn keep_fragment_links(url: &str) -> Option<std::borrow::Cow<'_, str>> {
     )))
 }
 
+/// One TeX equation as MathML, for the sanitizer to read like any other
+/// markup. The writer does not escape everything it emits (an operator `<`
+/// goes out bare), so nothing here is trusted on its own: it is cleaned with
+/// the rest of the document against the MathML allowlist below. No annotation,
+/// which would carry the TeX source through unescaped.
+fn render_math(tex: &str, display: bool) -> String {
+    use pulldown_latex::{config::DisplayMode, push_mathml, Parser, RenderConfig, Storage};
+    let storage = Storage::new();
+    let parser = Parser::new(tex, &storage);
+    let config = RenderConfig {
+        display_mode: if display {
+            DisplayMode::Block
+        } else {
+            DisplayMode::Inline
+        },
+        ..RenderConfig::default()
+    };
+    let mut mathml = String::new();
+    if push_mathml(&mut mathml, parser, config).is_err() {
+        // The writer only fails on an unrecoverable parse; show the source so
+        // the reader can see what did not typeset.
+        let mut fallback = String::from("<code>");
+        html_escape_into(&mut fallback, tex);
+        fallback.push_str("</code>");
+        return fallback;
+    }
+    mathml
+}
+
+fn html_escape_into(out: &mut String, text: &str) {
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            other => out.push(other),
+        }
+    }
+}
+
+/// MathML Core: the elements the equation renderer writes, and the
+/// presentation attributes it sets on them. None of them runs anything;
+/// `style` is the only one that could say more than it should, and it is
+/// filtered below.
+const MATHML_TAGS: [&str; 30] = [
+    "math",
+    "semantics",
+    "mrow",
+    "mi",
+    "mn",
+    "mo",
+    "mtext",
+    "mspace",
+    "ms",
+    "msup",
+    "msub",
+    "msubsup",
+    "mfrac",
+    "msqrt",
+    "mroot",
+    "mstyle",
+    "merror",
+    "mpadded",
+    "mphantom",
+    "mover",
+    "munder",
+    "munderover",
+    "mmultiscripts",
+    "mprescripts",
+    "mtable",
+    "mtr",
+    "mtd",
+    "maction",
+    "menclose",
+    "mglyph",
+];
+
+const MATHML_ATTRIBUTES: [&str; 35] = [
+    "class",
+    "style",
+    "display",
+    "displaystyle",
+    "scriptlevel",
+    "mathvariant",
+    "mathsize",
+    "mathcolor",
+    "mathbackground",
+    "stretchy",
+    "symmetric",
+    "largeop",
+    "movablelimits",
+    "fence",
+    "separator",
+    "form",
+    "lspace",
+    "rspace",
+    "minsize",
+    "maxsize",
+    "accent",
+    "accentunder",
+    "linethickness",
+    "width",
+    "height",
+    "depth",
+    "voffset",
+    "lspace",
+    "columnalign",
+    "rowalign",
+    "columnspacing",
+    "rowspacing",
+    "columnlines",
+    "rowlines",
+    "notation",
+];
+
+/// The only inline styles that pass: a column alignment on a table cell, and
+/// the handful of declarations the equation renderer writes on MathML
+/// elements — each one a known property with a value made of nothing but
+/// letters, digits, spaces and the punctuation a colour or a length needs.
+fn keep_known_styles<'a>(
+    element: &str,
+    attribute: &str,
+    value: &'a str,
+) -> Option<std::borrow::Cow<'a, str>> {
+    if attribute != "style" {
+        return Some(std::borrow::Cow::Borrowed(value));
+    }
+    if matches!(element, "th" | "td") {
+        return matches!(
+            value,
+            "text-align: left" | "text-align: center" | "text-align: right"
+        )
+        .then_some(std::borrow::Cow::Borrowed(value));
+    }
+    if !MATHML_TAGS.contains(&element) {
+        return None;
+    }
+    let every_declaration_known = value.split(';').all(|declaration| {
+        let declaration = declaration.trim();
+        if declaration.is_empty() {
+            return true;
+        }
+        let Some((property, rest)) = declaration.split_once(':') else {
+            return false;
+        };
+        let known = matches!(
+            property.trim(),
+            "color" | "margin-left" | "height" | "border-color" | "width"
+        );
+        let plain = rest.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-' | '#' | '(' | ')' | '%')
+        });
+        known && plain
+    });
+    every_declaration_known.then_some(std::borrow::Cow::Borrowed(value))
+}
+
 fn render_markdown(source: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{html, Event, Options, Parser};
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_FOOTNOTES);
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
+    options.insert(Options::ENABLE_MATH);
+
+    // `$…$` and `$$…$$` become MathML in the same stream, and the sanitizer
+    // reads them along with everything else.
     let mut rendered = String::with_capacity(source.len() + source.len() / 2);
-    html::push_html(&mut rendered, Parser::new_ext(source, options));
+    let events = Parser::new_ext(source, options).map(|event| match event {
+        Event::InlineMath(tex) => Event::Html(render_math(&tex, false).into()),
+        Event::DisplayMath(tex) => Event::Html(render_math(&tex, true).into()),
+        other => other,
+    });
+    html::push_html(&mut rendered, events);
 
     let mut builder = ammonia::Builder::default();
     builder.rm_tags(["img"]);
     builder.add_generic_attributes(["id"]);
     builder.id_prefix(Some(MARKDOWN_ID_PREFIX));
-    builder.url_relative(ammonia::UrlRelative::Custom(Box::new(keep_fragment_links)));
+    builder.url_relative(ammonia::UrlRelative::Custom(Box::new(keep_local_links)));
     // Task-list checkboxes; forms are inert anyway (form-action 'none').
     builder.add_tags(["input"]);
     builder.add_tag_attributes("input", ["type", "checked", "disabled"]);
+    // Footnotes are styled by class, and table columns keep their alignment.
+    builder.add_allowed_classes("div", ["footnote-definition"]);
+    builder.add_allowed_classes("sup", ["footnote-definition-label", "footnote-reference"]);
+    builder.add_tag_attributes("th", ["style"]);
+    builder.add_tag_attributes("td", ["style"]);
+    // Equations.
+    builder.add_tags(MATHML_TAGS);
+    for tag in MATHML_TAGS {
+        builder.add_tag_attributes(tag, MATHML_ATTRIBUTES);
+    }
+    builder.attribute_filter(keep_known_styles);
     builder.clean(&rendered).to_string()
 }
 
@@ -749,6 +932,22 @@ struct Launch {
     /// the platform whose installer it should offer.
     version: String,
     platform: String,
+}
+
+/// Open a link from a markdown file in the default browser.
+///
+/// Web and mail only. A `file:` or an application's own scheme handed to the
+/// shell is a way to run things, and a document must not have that.
+#[tauri::command]
+fn open_link(url: String) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    let web = lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:");
+    if !web || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("not a web link".into());
+    }
+    open::that_detached(&url).map_err(|error| error.to_string())
 }
 
 /// Open a release download in the default browser.
@@ -1200,6 +1399,7 @@ fn main() {
             read_markdown,
             snap,
             open_download,
+            open_link,
             print_document,
             set_title
         ])
@@ -1243,7 +1443,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{natural_key, open_download, parse_cli, render_markdown, Cli};
+    use super::{natural_key, open_download, open_link, parse_cli, render_markdown, Cli};
     use std::ffi::OsString;
 
     fn cli(words: &[&str]) -> Result<Cli, (i32, String)> {
@@ -1312,16 +1512,72 @@ mod tests {
     }
 
     #[test]
-    fn relative_links_do_not_survive() {
+    fn links_are_kept_for_the_frontend_to_route() {
         let html = render_markdown(
-            "[here](other.md) [site](https://example.com/x) note[^1]\n\n[^1]: the note",
+            "[here](other.md) [site](https://example.com/x) [run](javascript:alert(1)) note[^1]\n\n[^1]: the note",
         );
-        assert!(!html.contains("other.md"));
+        // Relative and web links survive as written; the click handler decides.
+        assert!(html.contains("href=\"other.md\""), "{html}");
         assert!(html.contains("href=\"https://example.com/x\""));
+        assert!(!html.contains("javascript:"), "{html}");
         // Footnotes keep working: the reference points at the prefixed id.
         assert!(html.contains("href=\"#md-1\""), "{html}");
         assert!(html.contains("id=\"md-1\""), "{html}");
         assert!(!html.contains("id=\"1\""));
+        assert!(html.contains("class=\"footnote-definition\""), "{html}");
+    }
+
+    #[test]
+    fn equations_become_mathml() {
+        let html = render_markdown("mass $E = mc^2$ and\n\n$$\\int_0^1 x\\,dx$$\n");
+        assert!(html.contains("<math"), "{html}");
+        assert!(html.contains("display=\"block\""), "{html}");
+        assert!(html.contains("<msup>"), "{html}");
+        assert!(!html.contains("<annotation"), "{html}");
+        // A colour the renderer wrote survives the style filter.
+        let colour = render_markdown("$\\color{red}{x}$");
+        assert!(colour.contains("style=\"color: rgb("), "{colour}");
+    }
+
+    #[test]
+    fn equations_cannot_smuggle_markup() {
+        let html = render_markdown("$\\text{<b onclick=x>hi</b>}$ and $x < 1$");
+        // The tag is text, not an element.
+        assert!(!html.contains("<b"), "{html}");
+        assert!(
+            html.contains("<mtext>&lt;b onclick=x&gt;hi&lt;/b&gt;</mtext>"),
+            "{html}"
+        );
+        // A bare `<` in an operator is re-serialized escaped.
+        assert!(html.contains("<mo>&lt;</mo>"), "{html}");
+        // MathML written straight into the document meets the same allowlist:
+        // the elements stay, a style the renderer would never write does not.
+        let raw = render_markdown("<math><mi style=\"background: url(x)\">x</mi></math>");
+        assert!(raw.contains("<math><mi>x</mi></math>"), "{raw}");
+    }
+
+    #[test]
+    fn matrices_and_spaces_survive_the_sanitizer() {
+        let html = render_markdown(
+            "$$\\begin{pmatrix} A & B \\\\ C & D \\end{pmatrix}$$\n\nand $\\text{a b } x$\n",
+        );
+        assert!(html.contains("<mtable"), "{html}");
+        assert!(html.contains("<mtr><mtd>"), "{html}");
+        // The renderer's `&nbsp;` is one character by the time it is served,
+        // not five that would show as text.
+        assert!(!html.contains("&amp;nbsp;"), "{html}");
+        assert!(
+            html.contains("<mtext>a b\u{a0}</mtext>") || html.contains("<mtext>a b&nbsp;</mtext>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn table_columns_keep_their_alignment() {
+        let html = render_markdown("| a | b |\n|:--|--:|\n| 1 | 2 |\n");
+        assert!(html.contains("style=\"text-align: right\""), "{html}");
+        let html = render_markdown("<p style=\"color: red\">x</p>");
+        assert!(!html.contains("style="), "{html}");
     }
 
     #[test]
@@ -1366,6 +1622,21 @@ mod tests {
             "file:///etc/passwd",
         ] {
             assert!(open_download(url.into()).is_err(), "{url} must be refused");
+        }
+    }
+
+    #[test]
+    fn only_web_links_leave_for_the_browser() {
+        // Same as above: no success path, it would open a browser.
+        for url in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ms-msdt:/id x",
+            "https://example.com/a b",
+            "http://example.com/\u{7}",
+            "other.md",
+        ] {
+            assert!(open_link(url.into()).is_err(), "{url} must be refused");
         }
     }
 }

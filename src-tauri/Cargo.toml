@@ -1,6 +1,6 @@
 [package]
 name = "pdf-next"
-version = "0.7.2"
+version = "0.8.0"
 description = "Tiny, fast PDF, image and markdown viewer that reloads when the file changes"
 authors = ["Ricardo Frantz"]
 license = "MIT"
@@ -27,6 +27,7 @@ percent-encoding = "2"
 # Hands a release download URL to the default browser — the one URL the
 # frontend may ask to open, and it is checked in Rust first.
 open = "5"
+pulldown-latex = "0.8.0"
 
 # The release binary is a GUI-subsystem executable, which has no console of its
 # own; attaching to the parent's is what lets `--help` and `opened …` print.
