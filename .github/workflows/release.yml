@@ -54,21 +54,49 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      # Windows binaries are signed with Azure Trusted Signing when the
+      # repository holds the credentials; without them the build is the same,
+      # just unsigned. See docs/distribution.md for the Azure side. Secrets:
+      # AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET. Variables:
+      # AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE.
+      # The sign command is handed to Tauri as a config overlay, so a build
+      # without credentials never sees it and the shared config stays
+      # platform-neutral.
+      - name: Prepare code signing
+        id: signing
+        if: matrix.platform == 'windows-latest' && env.HAS_SIGNING == 'true'
+        env:
+          HAS_SIGNING: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
+          ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        shell: pwsh
+        run: |
+          cargo install trusted-signing-cli --version 0.11.0 --locked
+          $command = "trusted-signing-cli -e $env:ENDPOINT -a $env:ACCOUNT -c $env:PROFILE %1"
+          @{ bundle = @{ windows = @{ signCommand = $command } } } |
+            ConvertTo-Json -Depth 5 |
+            Set-Content -Path signing.conf.json -Encoding utf8
+          "args=--config signing.conf.json" >> $env:GITHUB_OUTPUT
+
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: pdf-next ${{ github.ref_name }}
           releaseBody: |
             Download the build for your system below.
 
-            - **Windows** — `.exe` installer. SmartScreen will warn because the
-              binary is unsigned: choose *More info -> Run anyway*.
+            - **Windows** — `.exe` installer, or `winget install RicardoFrantz.pdf-next`.
+              If SmartScreen warns (an unsigned build), choose *More info -> Run anyway*.
             - **macOS** — universal `.dmg` (Intel and Apple Silicon). Unsigned,
               so first launch needs
               `xattr -d com.apple.quarantine /Applications/pdf-next.app`.
             - **Ubuntu** — `.AppImage` (chmod +x and run) or `.deb`.
           releaseDraft: false
           prerelease: false
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ steps.signing.outputs.args }}

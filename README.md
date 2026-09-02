@@ -112,9 +112,13 @@ Grab the build for your system from [Releases](https://github.com/ricardofrantz/
 
 | System | File | Notes |
 | ------ | ---- | ----- |
-| Windows | `.exe` installer | Unsigned — SmartScreen shows a warning; choose *More info → Run anyway*. |
+| Windows | `.exe` installer, or `winget install RicardoFrantz.pdf-next` | If SmartScreen warns on an unsigned build, choose *More info → Run anyway*. |
 | macOS | universal `.dmg` | Intel and Apple Silicon in one file. Unsigned — first launch needs `xattr -d com.apple.quarantine /Applications/pdf-next.app`. |
 | Ubuntu | `.AppImage` or `.deb` | AppImage: `chmod +x` and run. |
+
+Signing the Windows builds, publishing to winget and to the Microsoft Store are described in
+[docs/distribution.md](./docs/distribution.md); what the app does with the network, in
+[PRIVACY.md](./PRIVACY.md).
 
 Then open a file by double-clicking it, dragging it onto the window, pressing `Ctrl+O`, or
 passing a path:
