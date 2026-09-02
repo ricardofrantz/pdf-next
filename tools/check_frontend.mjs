@@ -2,7 +2,7 @@
 // expensive to notice: the real worker, streaming, the canvas budget, the
 // one-second poll, and the mid-build gap behaviour.
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 
 const app = await readFile('src/app.mjs', 'utf8');
 const main = await readFile('src-tauri/src/main.rs', 'utf8');
@@ -479,6 +479,36 @@ assert.match(
   /@media print \{[\s\S]*?body > svg,[\s\S]*?#imageStage \{\s*\n\s*display: none !important/,
   'The on-screen viewer must never be what goes on paper — nor the icon sprite, which is laid out on paper however hidden it looks and pushes page one onto a second sheet.',
 );
+
+// Every decoder the worker asks for by name must be vendored next to it.
+// The wasm modules are what render bitonal scans (CCITT and JBIG2 both go
+// through jbig2.wasm) and JPEG 2000; a missing one draws the picture white,
+// silently, and only on the files that use it.
+const worker = await readFile('src/vendor/pdfjs/build/pdf.worker.min.mjs', 'utf8');
+const wanted = new Set(
+  worker.match(/"[\w-]+\.wasm"|\b[\w-]+_nowasm_fallback\.js\b/g)?.map((name) => name.replaceAll('"', '')),
+);
+assert.ok(wanted.has('jbig2.wasm'), 'The worker is expected to name jbig2.wasm.');
+for (const name of wanted) {
+  await assert.doesNotReject(
+    access(`src/vendor/pdfjs/wasm/${name}`),
+    `The worker loads ${name}; it must be vendored in src/vendor/pdfjs/wasm/.`,
+  );
+}
+// And the worker must be told where they are in absolute terms: it fetches
+// them itself, and a relative path resolves against its own folder.
+assert.match(
+  app,
+  /function vendorUrl\(folder\) \{\s*return new URL\(`\.\/vendor\/pdfjs\/\$\{folder\}`, document\.baseURI\)\.href;/,
+  'vendorUrl must build an absolute URL from the page, not the worker.',
+);
+for (const option of ['cMapUrl', 'standardFontDataUrl', 'wasmUrl', 'iccUrl']) {
+  assert.match(
+    app,
+    new RegExp(`${option}: vendorUrl\\('[\\w]+/'\\)`),
+    `getDocument's ${option} must go through vendorUrl; a relative path 404s inside the worker.`,
+  );
+}
 
 // The README must name the runtime it actually ships.
 const vendored = version.match(/Version:\s*(\S+)/)?.[1];

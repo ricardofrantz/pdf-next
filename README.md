@@ -78,7 +78,7 @@ that survives a build deleting and recreating the file mid-compile.
   sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
   same size follows the first one, as it does in every other viewer. If the machine has nothing
   to print to — no printer, or a stopped print service — it says so rather than opening nothing.
-- **The title says which build you are running** — `paper.pdf — pdf-next 0.7.1` — so a bug report
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.7.2` — so a bug report
   can name a version without hunting for an about box.
 - **Tells you when there is a newer version.** A few seconds after launch the app asks
   GitHub for the latest release, once; if it is newer, the last toolbar button lights up and a

@@ -16,6 +16,11 @@ const { listen } = window.__TAURI__.event;
 
 GlobalWorkerOptions.workerSrc = './vendor/pdfjs/build/pdf.worker.min.mjs';
 
+/** A folder under the vendored PDF.js, as an absolute URL. */
+function vendorUrl(folder) {
+  return new URL(`./vendor/pdfjs/${folder}`, document.baseURI).href;
+}
+
 // A rendered page canvas is the dominant per-document cost: one A4 page at 200%
 // on a 2x display is ~30 MB of RGBA. Raising this to 2^23 (which would keep a
 // docked fit-width page on PDF.js's single-canvas path) measured worse here, so
@@ -733,11 +738,15 @@ async function showPdf(file, view, generation) {
     // The doc protocol answers full GETs only (no Accept-Ranges), so range
     // options would be inert. One streamed read per load is what happens.
     disableRange: true,
-    cMapUrl: './vendor/pdfjs/cmaps/',
+    // Absolute, because the worker fetches these itself and a relative path
+    // would resolve against the worker's own folder. A wrong folder is a
+    // quiet 404: CJK text loses its glyphs, and a scanned page (CCITT and
+    // JBIG2 both decode in jbig2.wasm) comes up white.
+    cMapUrl: vendorUrl('cmaps/'),
     cMapPacked: true,
-    standardFontDataUrl: './vendor/pdfjs/standard_fonts/',
-    wasmUrl: './vendor/pdfjs/wasm/',
-    iccUrl: './vendor/pdfjs/iccs/',
+    standardFontDataUrl: vendorUrl('standard_fonts/'),
+    wasmUrl: vendorUrl('wasm/'),
+    iccUrl: vendorUrl('iccs/'),
   });
   // Held for teardown: dropping this reference is what leaks the worker.
   state.task = task;
