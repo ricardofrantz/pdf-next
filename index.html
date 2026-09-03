@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>pdf-next for Debian and Ubuntu</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 46rem; margin: 3rem auto; padding: 0 1.25rem;
+         font: 16px/1.6 system-ui, sans-serif; }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  p.lead { margin-top: 0; opacity: .75; }
+  pre { padding: 1rem; border-radius: 6px; overflow-x: auto;
+        background: color-mix(in srgb, currentColor 8%, transparent); }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: .9em; }
+  footer { margin-top: 3rem; font-size: .9em; opacity: .7; }
+</style>
+
+<h1>pdf-next</h1>
+<p class="lead">A small PDF, image and markdown viewer that reloads the moment
+the file changes. This page is its apt repository.</p>
+
+<h2>Install</h2>
+<pre><code>sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://ricardofrantz.github.io/pdf-next/pdf-next.asc \
+  | sudo tee /etc/apt/keyrings/pdf-next.asc &gt; /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/pdf-next.asc] https://ricardofrantz.github.io/pdf-next stable main" \
+  | sudo tee /etc/apt/sources.list.d/pdf-next.list &gt; /dev/null
+sudo apt update
+sudo apt install pdf-next</code></pre>
+
+<p>Updates then arrive with <code>apt upgrade</code> like anything else.
+Only <code>amd64</code> is published.</p>
+
+<h2>Remove</h2>
+<pre><code>sudo apt remove pdf-next
+sudo rm /etc/apt/sources.list.d/pdf-next.list /etc/apt/keyrings/pdf-next.asc</code></pre>
+
+<footer>
+  Packages are built and signed by
+  <a href="https://github.com/ricardofrantz/pdf-next/actions">GitHub Actions</a>
+  from <a href="https://github.com/ricardofrantz/pdf-next">the source</a>.
+  Signing key fingerprint
+  <code>94AF 4860 CC16 FD9C 1C66 044B A419 FDEC 5985 1786</code>.
+</footer>
