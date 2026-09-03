@@ -1,8 +1,8 @@
-# Distribution: signing, winget, the Microsoft Store
+# Distribution
 
-Every tag `v*` already builds and publishes installers for Windows, macOS
-and Linux. This page is the rest: how the Windows builds get a signature,
-how they reach `winget`, and how they reach the Store.
+Every tag `v*` builds and publishes installers for Windows, macOS and Linux.
+This page is the rest: how the Windows builds get a signature, and how each
+package manager — winget, the Microsoft Store, Homebrew, apt — is fed.
 
 ## Code signing on Windows (Azure Trusted Signing)
 

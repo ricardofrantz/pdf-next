@@ -158,7 +158,10 @@ jobs:
             -o APT::FTPArchive::Release::Architectures=amd64 \
             -o APT::FTPArchive::Release::Components=main \
             -o APT::FTPArchive::Release::Description="pdf-next releases" \
-            release dists/stable > dists/stable/Release
+            release dists/stable > Release.tmp
+          # Written outside the tree first: the redirect would otherwise create
+          # the file before the scan, and Release would list itself.
+          mv Release.tmp dists/stable/Release
 
           export GNUPGHOME=$(mktemp -d)
           chmod 700 "$GNUPGHOME"
