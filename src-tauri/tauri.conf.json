@@ -27,6 +27,7 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
+    "publisher": "Ricardo Frantz",
     "shortDescription": "Tiny PDF, image and markdown viewer with one-second live reload",
     "longDescription": "pdf-next opens PDFs, images and markdown, follows your system dark mode, searches text, and reloads within a second of the file changing on disk — built for the LaTeX, Typst and markdown compile loop.",
     "icon": [
