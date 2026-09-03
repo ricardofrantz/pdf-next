@@ -108,15 +108,29 @@ that survives a build deleting and recreating the file mid-compile.
 
 ## Install
 
-Grab the build for your system from [Releases](https://github.com/ricardofrantz/pdf-next/releases):
+| System | Command |
+| ------ | ------- |
+| Windows | `winget install RicardoFrantz.pdf-next` |
+| macOS | `brew install --cask --no-quarantine ricardofrantz/tap/pdf-next` |
+| Debian, Ubuntu | add the repository below, then `sudo apt install pdf-next` |
 
-| System | File | Notes |
-| ------ | ---- | ----- |
-| Windows | `.exe` installer, or `winget install RicardoFrantz.pdf-next` | If SmartScreen warns on an unsigned build, choose *More info → Run anyway*. |
-| macOS | universal `.dmg` | Intel and Apple Silicon in one file. Unsigned — first launch needs `xattr -d com.apple.quarantine /Applications/pdf-next.app`. |
-| Ubuntu | `.AppImage` or `.deb` | AppImage: `chmod +x` and run. |
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://ricardofrantz.github.io/pdf-next/pdf-next.asc \
+  | sudo tee /etc/apt/keyrings/pdf-next.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/pdf-next.asc] https://ricardofrantz.github.io/pdf-next stable main" \
+  | sudo tee /etc/apt/sources.list.d/pdf-next.list > /dev/null
+sudo apt update && sudo apt install pdf-next
+```
 
-Signing the Windows builds, publishing to winget and to the Microsoft Store are described in
+Or take the file itself from [Releases](https://github.com/ricardofrantz/pdf-next/releases):
+`.exe` or `.msi` for Windows, a universal `.dmg` for macOS, `.deb`, `.rpm` or `.AppImage`
+(`chmod +x` and run) for Linux.
+
+The builds are not code signed yet, so Windows SmartScreen warns once — *More info → Run
+anyway* — and macOS holds the app in quarantine, which is what `--no-quarantine` above is
+for; from the `.dmg`, `xattr -d com.apple.quarantine /Applications/pdf-next.app` does the
+same. Signing, and how each of these channels is published, are described in
 [docs/distribution.md](./docs/distribution.md); what the app does with the network, in
 [PRIVACY.md](./PRIVACY.md).
 

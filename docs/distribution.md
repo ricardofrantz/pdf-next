@@ -105,3 +105,67 @@ The Store accepts a plain Win32 installer by URL; no MSIX packaging.
 Each release is a new submission with the new versioned URL. Store users are
 told of updates by the Store; the app's own launch check fires too and sends
 them to the same installer on GitHub, which is harmless.
+
+## Homebrew
+
+Homebrew's own cask repository asks a package to be notable — 75 stars, or 30
+forks, or 30 watchers — which pdf-next is not yet. A personal tap has no such
+bar and works the same way for the person installing:
+
+```
+brew install --cask --no-quarantine ricardofrantz/tap/pdf-next
+```
+
+The tap is [ricardofrantz/homebrew-tap](https://github.com/ricardofrantz/homebrew-tap).
+`Casks/pdf-next.rb` names the version and the checksum of the universal
+`.dmg`; a workflow in that repository reads the latest release here once a
+day and commits the new version by itself, so a release needs nothing from
+you.
+
+`--no-quarantine` is needed only while the app is unsigned. Signing it means
+an Apple Developer Program membership (US$99 a year) and notarization, which
+is a separate matter from the Windows signing above.
+
+When the project does become notable, the same cask can be submitted to
+`homebrew/homebrew-cask` and the tap retired.
+
+## apt
+
+The apt repository is the `gh-pages` branch of this repository, served by
+GitHub Pages at <https://ricardofrantz.github.io/pdf-next>. The `apt` job in
+`release.yml` rebuilds it after every tag: it takes the `.deb` that was just
+published, regenerates `Packages` and `Release`, signs them, and pushes.
+Every version stays in `pool/`, so `apt install pdf-next=0.9.0` keeps working
+after a newer one lands.
+
+Apt refuses an unsigned repository, so the job needs a signing key. The
+public half lives at `pdf-next.asc` on that branch and is what a user adds to
+`/etc/apt/keyrings/`; the private half is the `APT_GPG_PRIVATE_KEY` secret.
+
+To create a key and install it:
+
+```
+gpg --batch --gen-key <<'EOF'
+%no-protection
+Key-Type: RSA
+Key-Length: 4096
+Key-Usage: sign
+Name-Real: pdf-next apt repository
+Name-Email: you@example.com
+Expire-Date: 0
+%commit
+EOF
+fpr=$(gpg --list-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
+gpg --armor --export-secret-keys "$fpr" | gh secret set APT_GPG_PRIVATE_KEY
+gpg --armor --export "$fpr" > pdf-next.asc   # commit this to gh-pages
+```
+
+The key has no passphrase because the workflow runs unattended. It signs
+index files, not the packages themselves, and can be replaced at any time by
+setting a new secret and committing the new `pdf-next.asc`.
+
+Without the secret the job prints a warning and stops; the rest of the
+release is unaffected.
+
+An `.rpm` is built too, but no yum repository is published. The same pattern
+would work — `createrepo_c` in place of `dpkg-scanpackages` — if anyone asks.
