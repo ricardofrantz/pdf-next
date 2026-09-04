@@ -111,7 +111,7 @@ that survives a build deleting and recreating the file mid-compile.
 | System | Command |
 | ------ | ------- |
 | Windows | `winget install RicardoFrantz.pdf-next` |
-| macOS | `brew install --cask --no-quarantine ricardofrantz/tap/pdf-next` |
+| macOS | `brew install --cask ricardofrantz/tap/pdf-next` |
 | Debian, Ubuntu | add the repository below, then `sudo apt install pdf-next` |
 
 ```bash
@@ -128,9 +128,14 @@ Or take the file itself from [Releases](https://github.com/ricardofrantz/pdf-nex
 (`chmod +x` and run) for Linux.
 
 The builds are not code signed yet, so Windows SmartScreen warns once — *More info → Run
-anyway* — and macOS holds the app in quarantine, which is what `--no-quarantine` above is
-for; from the `.dmg`, `xattr -d com.apple.quarantine /Applications/pdf-next.app` does the
-same. Signing, and how each of these channels is published, are described in
+anyway* — and macOS quarantines the app and refuses its first launch, whether it came from
+Homebrew or the `.dmg`. Let that copy through once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/pdf-next.app
+```
+
+Signing, and how each of these channels is published, are described in
 [docs/distribution.md](./docs/distribution.md); what the app does with the network, in
 [PRIVACY.md](./PRIVACY.md).
 

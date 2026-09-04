@@ -94,9 +94,9 @@ jobs:
             - **Windows** — `.exe` installer, or `winget install RicardoFrantz.pdf-next`.
               If SmartScreen warns (an unsigned build), choose *More info -> Run anyway*.
             - **macOS** — universal `.dmg` (Intel and Apple Silicon), or
-              `brew install --cask --no-quarantine ricardofrantz/tap/pdf-next`.
-              Unsigned, so a first launch from the `.dmg` needs
-              `xattr -d com.apple.quarantine /Applications/pdf-next.app`.
+              `brew install --cask ricardofrantz/tap/pdf-next`. Unsigned, so
+              the first launch needs
+              `xattr -dr com.apple.quarantine /Applications/pdf-next.app`.
             - **Debian and Ubuntu** — `apt install pdf-next` once the
               repository at https://ricardofrantz.github.io/pdf-next is added
               (see the README), or the `.deb` and `.AppImage` below.

@@ -113,7 +113,8 @@ forks, or 30 watchers — which pdf-next is not yet. A personal tap has no such
 bar and works the same way for the person installing:
 
 ```
-brew install --cask --no-quarantine ricardofrantz/tap/pdf-next
+brew install --cask ricardofrantz/tap/pdf-next
+xattr -dr com.apple.quarantine /Applications/pdf-next.app
 ```
 
 The tap is [ricardofrantz/homebrew-tap](https://github.com/ricardofrantz/homebrew-tap).
@@ -122,12 +123,19 @@ The tap is [ricardofrantz/homebrew-tap](https://github.com/ricardofrantz/homebre
 day and commits the new version by itself, so a release needs nothing from
 you.
 
-`--no-quarantine` is needed only while the app is unsigned. Signing it means
-an Apple Developer Program membership (US$99 a year) and notarization, which
-is a separate matter from the Windows signing above.
+The second line is there because the app is not signed: macOS quarantines it
+and refuses the first launch. Homebrew offered `--no-quarantine` for exactly
+this and removed it in 5.0 on purpose — it will not help anyone past a
+Gatekeeper check again, and the cask prints the `xattr` line as a caveat
+instead. The same removal came with a rule that casks in Homebrew's own
+repository must be signed and notarized from September 2026, so the personal
+tap is not a way around notarization; it is a way around the popularity bar
+only.
 
-When the project does become notable, the same cask can be submitted to
-`homebrew/homebrew-cask` and the tap retired.
+Signing a Mac build means an Apple Developer Program membership (US$99 a
+year) and notarizing each build, which is a separate matter from the Windows
+signing above. It is what would remove the `xattr` line, and what the
+official cask repository would need.
 
 ## apt
 
