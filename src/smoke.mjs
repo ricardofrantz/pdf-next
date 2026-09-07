@@ -8,6 +8,40 @@
 /** Everything the page has failed at, oldest first. */
 export const failures = [];
 
+/// How far the boot sequence got. app.mjs sets this as it passes each step it
+/// waits on, so a launch that hangs can say *where* rather than only that it
+/// produced nothing.
+export const progress = { at: 'start' };
+
+/** Record that the boot reached a step. */
+export function mark(step) {
+  progress.at = step;
+}
+
+/// A launch that never finishes reports nothing at all: every check in app.mjs
+/// runs after the awaits that would be stuck. This timer runs instead of them.
+///
+/// It fires in a normal launch too, where `smoke_report` is a no-op because
+/// the process was not started for a smoke run — and app.mjs clears it as soon
+/// as it knows this is not one.
+let stall = window.setTimeout(() => {
+  const invoke = window.__TAURI__?.core?.invoke;
+  if (!invoke) {
+    return;
+  }
+  const note = failures.length ? ` after: ${failures.join(' | ')}` : '';
+  void invoke('smoke_report', {
+    ok: false,
+    detail: `boot stalled at ${progress.at}${note}`,
+  }).catch(() => {});
+}, 45_000);
+
+/** Stop the stall report. Called once the boot is known to be progressing. */
+export function bootIsFine() {
+  window.clearTimeout(stall);
+  stall = undefined;
+}
+
 /** A short, single-line description of a thrown value. */
 function describe(value) {
   if (value instanceof Error) {

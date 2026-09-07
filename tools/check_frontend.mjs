@@ -628,6 +628,17 @@ assert.match(
   'A frontend that never answers must still end the run; that is the blank-window case.',
 );
 
+assert.match(
+  smoke,
+  /boot stalled at \$\{progress\.at\}/,
+  'A launch that hangs must name the step it hung in; every check in app.mjs runs after it.',
+);
+assert.match(
+  app,
+  /mark\('os_theme'\);\s*applyTheme\(await invoke\('os_theme'\)\)/,
+  'The first call the boot waits on must be marked, or a hang there looks like a blank window.',
+);
+
 // The fixtures the smoke test opens, one per kind the viewer claims to show.
 for (const fixture of [
   'tests/fixtures/hello.pdf',

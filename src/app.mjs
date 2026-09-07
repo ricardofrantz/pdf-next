@@ -1,6 +1,6 @@
 // pdf-next viewer. One file, one window, one job: show the document and keep
 // showing the newest version of it.
-import { failures } from './smoke.mjs';
+import { bootIsFine, failures, mark } from './smoke.mjs';
 import * as pdfjsLib from './vendor/pdfjs/build/pdf.min.mjs';
 
 // pdf_viewer.mjs resolves the core library through this global. Never assign
@@ -2238,7 +2238,12 @@ listen('theme-changed', (event) => applyTheme(event.payload));
 
 // ── Start ─────────────────────────────────────────────────────────────────
 
+// Each step the boot waits on is marked before it is entered, so a launch
+// that hangs names the call it hung in. The window is already up by now, and
+// a window with nothing in it is the failure being guarded against.
+mark('os_theme');
 applyTheme(await invoke('os_theme'));
+mark('preferences');
 
 try {
   const saved = localStorage.getItem('pdf-next.mode');
@@ -2267,7 +2272,11 @@ try {
 }
 
 // Command-line flags style this launch without changing saved preferences.
+mark('launch_options');
 const launch = await invoke('launch_options').catch(() => ({}));
+if (!launch?.smoke) {
+  bootIsFine();
+}
 state.version = String(launch?.version || '');
 state.platform = String(launch?.platform || '');
 setTitle(state.file?.name || '');
@@ -2287,12 +2296,15 @@ if (launch?.mode) {
   }
 }
 
+mark('initial_file');
 const initial = await invoke('initial_file');
 // Files that reached the app before this code was listening — a Finder
 // double-click on macOS lands here. Asking also switches the app to live
 // `open-files` events, so the listener must be in place first.
+mark('pending_files');
 await openFilesReady;
 const pending = await invoke('pending_files').catch(() => []);
+mark('opening');
 if (initial) {
   await openInTab(initial, { target: asTarget(launch?.target) });
   // Extra paths on the command line become tabs; the first one stays showing.
@@ -2310,6 +2322,7 @@ if (initial) {
 } else if (pending.length) {
   await openMany(pending);
 }
+mark('open');
 ui.container.focus();
 
 // ── Smoke verdict ─────────────────────────────────────────────────────────
@@ -2356,6 +2369,7 @@ async function reportSmoke() {
       (failures.length ? ` after: ${failures.join(' | ')}` : '')
     );
   };
+  bootIsFine();
   try {
     const file = state.file;
     if (!file) {
