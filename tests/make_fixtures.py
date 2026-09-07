@@ -72,6 +72,27 @@ def one_page(text: str, pages: int = 1) -> bytes:
     return pdf(objects)
 
 
+def stored_zlib(data: bytes) -> bytes:
+    """Wrap `data` in a zlib stream that uses stored (uncompressed) blocks.
+
+    `zlib.compress` is not byte-reproducible: its output depends on the zlib
+    build, so the same script writes a different file on macOS than it does
+    on Windows. Stored blocks are defined by the format alone, so this gives
+    the same bytes everywhere and the fixture can be checked against the
+    script that claims to write it.
+    """
+    out = bytearray([0x78, 0x01])
+    block = 65535
+    for start in range(0, max(len(data), 1), block):
+        piece = data[start : start + block]
+        last = 1 if start + block >= len(data) else 0
+        out.append(last)
+        out += struct.pack("<HH", len(piece), len(piece) ^ 0xFFFF)
+        out += piece
+    out += struct.pack(">I", zlib.adler32(data) & 0xFFFFFFFF)
+    return bytes(out)
+
+
 def png(width: int = 64, height: int = 48) -> bytes:
     """A small truecolour PNG holding a gradient, not a flat fill.
 
@@ -99,7 +120,7 @@ def png(width: int = 64, height: int = 48) -> bytes:
     return (
         signature
         + chunk(b"IHDR", header)
-        + chunk(b"IDAT", zlib.compress(rows, 9))
+        + chunk(b"IDAT", stored_zlib(rows))
         + chunk(b"IEND", b"")
     )
 
