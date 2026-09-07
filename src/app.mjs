@@ -2353,6 +2353,20 @@ async function renderedPixels() {
   });
 }
 
+/// Wait for a condition that a decoding image or a laid-out column reaches a
+/// tick or two after the open resolves. Polling, not an event, because the
+/// thing being waited for may already be true.
+async function settles(test, ms = 20_000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (test()) {
+      return true;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+  }
+  return test();
+}
+
 /// Report to the build server whether this launch works, then let it end the
 /// process. Only ever runs under PDF_NEXT_SMOKE; a reader never gets here.
 async function reportSmoke() {
@@ -2392,11 +2406,14 @@ async function reportSmoke() {
       return;
     }
     // Images and markdown have their own containers; a non-empty one is the
-    // same evidence a painted canvas is for a PDF.
-    const shown =
+    // same evidence a painted canvas is for a PDF. An <img> decodes after the
+    // open resolves, so this waits rather than asking once and calling a
+    // picture that had not arrived yet a failure.
+    const shown = await settles(() =>
       file.kind === 'image'
         ? ui.image.naturalWidth > 0
-        : (ui.markdown?.textContent || '').trim().length > 0;
+        : (ui.markdown?.textContent || '').trim().length > 0,
+    );
     await invoke('smoke_report', {
       ok: shown,
       detail: shown
