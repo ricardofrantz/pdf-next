@@ -1035,6 +1035,11 @@ struct Launch {
     /// the platform whose installer it should offer.
     version: String,
     platform: String,
+    /// True when `PDF_NEXT_SMOKE` is set in the environment. The frontend then
+    /// reports whether the launch file actually rendered, through
+    /// `smoke_report`, and the process exits on that answer instead of waiting
+    /// for a reader. Off in every normal launch.
+    smoke: bool,
 }
 
 /// Open a link from a markdown file in the default browser.
@@ -1473,6 +1478,54 @@ fn launch_options(launch: State<'_, Launch>) -> Launch {
     launch.inner().clone()
 }
 
+// ── Smoke mode ────────────────────────────────────────────────────────────
+//
+// A build can start, show a window, and still be useless: the webview is a
+// second program, and nothing on the Rust side notices when it fails to draw
+// the document. That is how 0.9.0 reached macOS users with a window that
+// opened and stayed empty. `PDF_NEXT_SMOKE` closes the loop — the frontend
+// says what it rendered, and the process exits on that answer, so a build
+// server can tell a working viewer from a blank one.
+
+/// Is this a smoke run? Set by `PDF_NEXT_SMOKE` in the environment.
+fn smoke_enabled() -> bool {
+    std::env::var_os("PDF_NEXT_SMOKE").is_some_and(|value| !value.is_empty())
+}
+
+/// How long the frontend gets to report, in seconds. A cold webview on a
+/// loaded build machine is slow, so the default is generous; a run that
+/// reaches it has hung, which is itself the answer.
+fn smoke_timeout() -> u64 {
+    std::env::var("PDF_NEXT_SMOKE_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(90)
+}
+
+/// End a smoke run. Printed on one line, so a log tells the story without a
+/// parser, and the exit status carries the verdict for the shell.
+fn smoke_finish(ok: bool, detail: &str) -> ! {
+    use std::io::Write;
+    if ok {
+        println!("smoke: ok {detail}");
+    } else {
+        println!("smoke: fail {detail}");
+    }
+    let _ = std::io::stdout().flush();
+    std::process::exit(if ok { 0 } else { 1 });
+}
+
+/// The frontend's verdict on the launch file: did it render, and what went
+/// wrong if it did not. Reachable in a normal run too, where it does nothing,
+/// because the frontend only calls it when `launch.smoke` said to.
+#[tauri::command]
+fn smoke_report(ok: bool, detail: String, launch: State<'_, Launch>) {
+    if !launch.smoke {
+        return;
+    }
+    smoke_finish(ok, &detail);
+}
+
 /// The webview must never leave the app's own origin.
 ///
 /// A malicious PDF can carry a link annotation pointing anywhere. Without this,
@@ -1536,7 +1589,12 @@ fn main() {
         let must_stay = launched_by_launch_services(&context.config().identifier);
         #[cfg(not(target_os = "macos"))]
         let must_stay = false;
-        if !invocation.wait && !cfg!(debug_assertions) && !must_stay && detach(&arguments) {
+        if !invocation.wait
+            && !cfg!(debug_assertions)
+            && !must_stay
+            && !smoke_enabled()
+            && detach(&arguments)
+        {
             return;
         }
     }
@@ -1557,11 +1615,17 @@ fn main() {
     }
     launch.version = VERSION.to_string();
     launch.platform = std::env::consts::OS.to_string();
+    launch.smoke = smoke_enabled();
 
-    tauri::Builder::default()
-        // Must be the first plugin: a second launch hands its files to the
-        // running window and exits before anything else initializes.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+    let mut builder = tauri::Builder::default();
+    // Must be the first plugin: a second launch hands its files to the
+    // running window and exits before anything else initializes.
+    //
+    // A smoke run leaves it out. Handing over would make the second run exit 0
+    // without ever opening a document, and a test that passes by not running
+    // is worse than no test.
+    if !smoke_enabled() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             let cwd = PathBuf::from(cwd);
             let arguments = argv.into_iter().skip(1).map(std::ffi::OsString::from);
             let (files, focus) = match parse_cli(arguments, Some(&cwd)) {
@@ -1569,7 +1633,9 @@ fn main() {
                 _ => (Vec::new(), true),
             };
             deliver(app, files, focus);
-        }))
+        }));
+    }
+    builder
         .plugin(navigation_guard())
         .plugin(tauri_plugin_dialog::init())
         .manage(Watched::default())
@@ -1592,7 +1658,8 @@ fn main() {
             open_download,
             open_link,
             print_document,
-            set_title
+            set_title,
+            smoke_report
         ])
         .setup(move |app| {
             if let Some(seconds) = launch.poll {
@@ -1611,6 +1678,16 @@ fn main() {
                 });
             }
             spawn_watcher(app.handle().clone());
+            if smoke_enabled() {
+                // A frontend that never reports is the failure this mode is
+                // for: a window that opens and draws nothing raises no error
+                // anywhere else.
+                let seconds = smoke_timeout();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(seconds));
+                    smoke_finish(false, &format!("no report within {seconds}s"));
+                });
+            }
             Ok(())
         })
         .build(context)

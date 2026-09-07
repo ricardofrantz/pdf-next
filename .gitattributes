@@ -1,0 +1,6 @@
+# The smoke fixtures are byte-exact. A PDF is mostly ASCII, so git guesses it
+# is text and rewrites its line endings on checkout — which moves every byte
+# after the first newline and leaves the cross-reference table pointing at
+# nothing. The file then fails to open on one platform and not the others.
+*.pdf binary
+*.png binary

@@ -10,6 +10,8 @@ const config = JSON.parse(await readFile('src-tauri/tauri.conf.json', 'utf8'));
 const styles = await readFile('src/style.css', 'utf8');
 const version = await readFile('src/vendor/PDFJS_VERSION', 'utf8');
 const readme = await readFile('README.md', 'utf8');
+const page = await readFile('src/index.html', 'utf8');
+const smoke = await readFile('src/smoke.mjs', 'utf8');
 
 // PDF.js must parse in a real worker thread.
 assert.match(
@@ -361,8 +363,18 @@ assert.match(
 );
 assert.match(
   main,
-  /tauri::Builder::default\(\)\s*(\/\/[^\n]*\n\s*)*\.plugin\(tauri_plugin_single_instance::init\(/,
+  /tauri::Builder::default\(\);[\s\S]{0,700}?\.plugin\(tauri_plugin_single_instance::init\(/,
   'single-instance must be the first plugin: a second launch forwards its files and exits.',
+);
+assert.match(
+  main,
+  /if !smoke_enabled\(\) \{[\s\S]{0,400}?tauri_plugin_single_instance::init\(/,
+  'A smoke run must skip single-instance, or a second run exits 0 without opening anything.',
+);
+assert.doesNotMatch(
+  main,
+  /\.plugin\(navigation_guard\(\)\)[\s\S]*?tauri_plugin_single_instance::init\(/,
+  'Nothing may be registered before single-instance.',
 );
 assert.match(
   main,
@@ -376,7 +388,7 @@ assert.match(
 );
 assert.match(
   main,
-  /!invocation\.wait && !cfg!\(debug_assertions\) && !must_stay && detach\(&arguments\)/,
+  /!invocation\.wait[\s\S]{0,200}?!cfg!\(debug_assertions\)[\s\S]{0,200}?!must_stay[\s\S]{0,200}?!smoke_enabled\(\)[\s\S]{0,200}?detach\(&arguments\)/,
   'Detach only in release, only without --wait, never when LaunchServices started us.',
 );
 assert.match(
@@ -575,6 +587,56 @@ assert.match(
   'open_link must refuse every scheme but http, https and mailto.',
 );
 assert.match(app, /const target = siblingPath\(href\);\s*if \(target\) \{\s*void openPath\(target\);/, 'Relative markdown links open as tabs.');
+
+// Smoke mode. Nothing here runs for a reader; it exists so a build server can
+// tell a working viewer from a window that opens and draws nothing. Each part
+// is easy to drop by accident and silent when dropped, which is the whole
+// reason the 0.9.0 macOS build shipped.
+assert.match(
+  page,
+  /<script type="module" src="\.\/smoke\.mjs"><\/script>\s*<script type="module" src="\.\/app\.mjs"><\/script>/,
+  'smoke.mjs must load before app.mjs, or a failure inside app.mjs is never seen.',
+);
+assert.match(
+  smoke,
+  /addEventListener\('error'[\s\S]*?addEventListener\('unhandledrejection'/,
+  'The failure buffer must catch both thrown errors and rejected promises.',
+);
+assert.match(
+  app,
+  /if \(launch\?\.smoke\) \{\s*void reportSmoke\(\);/,
+  'The frontend must report its verdict when the launch says this is a smoke run.',
+);
+assert.match(
+  app,
+  /async function renderedPixels\(\)[\s\S]*?canvas\.width > 0 && canvas\.height > 0/,
+  'A PDF counts as shown only when a page canvas has pixels; "no error" is not evidence.',
+);
+assert.match(
+  main,
+  /invoke_handler\(tauri::generate_handler!\[[\s\S]*?smoke_report[\s\S]*?\]\)/,
+  'smoke_report must be registered, or the frontend can never answer.',
+);
+assert.match(
+  main,
+  /fn smoke_finish\([\s\S]*?-> ![\s\S]*?std::process::exit\(if ok \{ 0 \} else \{ 1 \}\)/,
+  'The verdict must reach the shell as an exit status.',
+);
+assert.match(
+  main,
+  /if smoke_enabled\(\) \{[\s\S]{0,500}?smoke_finish\(false, &format!\("no report within/,
+  'A frontend that never answers must still end the run; that is the blank-window case.',
+);
+
+// The fixtures the smoke test opens, one per kind the viewer claims to show.
+for (const fixture of [
+  'tests/fixtures/hello.pdf',
+  'tests/fixtures/three-pages.pdf',
+  'tests/fixtures/swatch.png',
+  'tests/fixtures/notes.md',
+]) {
+  await access(fixture);
+}
 
 // The README must name the runtime it actually ships.
 const vendored = version.match(/Version:\s*(\S+)/)?.[1];

@@ -1,5 +1,6 @@
 // pdf-next viewer. One file, one window, one job: show the document and keep
 // showing the newest version of it.
+import { failures } from './smoke.mjs';
 import * as pdfjsLib from './vendor/pdfjs/build/pdf.min.mjs';
 
 // pdf_viewer.mjs resolves the core library through this global. Never assign
@@ -2310,6 +2311,83 @@ if (initial) {
   await openMany(pending);
 }
 ui.container.focus();
+
+// ── Smoke verdict ─────────────────────────────────────────────────────────
+
+/// Did the launch file actually reach the screen?
+///
+/// "The window opened" is not the question — 0.9.0 opened a window on macOS
+/// and drew nothing in it. A PDF has arrived when PDF.js has painted a page
+/// canvas, so that is what this waits for, and pixels are what it reports.
+async function renderedPixels() {
+  const painted = () =>
+    [...ui.viewer.querySelectorAll('canvas')].some(
+      (canvas) => canvas.width > 0 && canvas.height > 0,
+    );
+  if (painted()) {
+    return true;
+  }
+  // A page can still be in flight; PDF.js says so when it finishes one.
+  return new Promise((resolve) => {
+    const done = (value) => {
+      eventBus.off('pagerendered', onRendered);
+      window.clearTimeout(timer);
+      resolve(value);
+    };
+    const onRendered = () => done(painted());
+    const timer = window.setTimeout(() => done(false), 20_000);
+    eventBus.on('pagerendered', onRendered);
+  });
+}
+
+/// Report to the build server whether this launch works, then let it end the
+/// process. Only ever runs under PDF_NEXT_SMOKE; a reader never gets here.
+async function reportSmoke() {
+  const note = failures.length ? ` after: ${failures.join(' | ')}` : '';
+  try {
+    const file = state.file;
+    if (!file) {
+      await invoke('smoke_report', {
+        ok: false,
+        detail: `no file opened${note}`,
+      });
+      return;
+    }
+    if (file.kind === 'pdf') {
+      const pages = state.document?.numPages ?? 0;
+      const painted = await renderedPixels();
+      const ok = pages > 0 && painted;
+      await invoke('smoke_report', {
+        ok,
+        detail: ok
+          ? `${file.name} rendered, ${pages} page${pages === 1 ? '' : 's'}`
+          : `${file.name} did not render: ${pages} pages, painted=${painted}${note}`,
+      });
+      return;
+    }
+    // Images and markdown have their own containers; a non-empty one is the
+    // same evidence a painted canvas is for a PDF.
+    const shown =
+      file.kind === 'image'
+        ? ui.image.naturalWidth > 0
+        : (ui.markdown?.textContent || '').trim().length > 0;
+    await invoke('smoke_report', {
+      ok: shown,
+      detail: shown
+        ? `${file.name} rendered (${file.kind})`
+        : `${file.name} did not render (${file.kind})${note}`,
+    });
+  } catch (error) {
+    await invoke('smoke_report', {
+      ok: false,
+      detail: `smoke check threw: ${error?.message || error}${note}`,
+    }).catch(() => {});
+  }
+}
+
+if (launch?.smoke) {
+  void reportSmoke();
+}
 
 // The launch check, after the document is up so the first paint never waits on
 // the network. Quiet: an offline machine or a current build hears nothing.
