@@ -15,7 +15,7 @@ use std::sync::{
 use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
-use tauri::{http, AppHandle, Emitter, Manager, State, Theme, WindowEvent};
+use tauri::{http, AppHandle, DragDropEvent, Emitter, Manager, State, Theme, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
 /// Poll cadence in seconds; 0 turns watching off. The watcher re-reads this
@@ -347,6 +347,63 @@ fn pending_files(watched: State<'_, Watched>) -> Vec<Opening> {
 /// `focus` is what `--no-focus` turns off. A person handing over a file wants
 /// the window; a script opening six figures in a row does not want the desktop
 /// yanked six times, and the tabs are there when they look.
+/// The paths of the files on the drag pasteboard, for a drop that arrived
+/// with none.
+///
+/// macOS carries the names of dropped files on more than one pasteboard type.
+/// The webview reads the older one, `NSFilenamesPboardType`, and hands over an
+/// empty list when the drop carries only the current one. The pasteboard
+/// itself still holds the names: it keeps its contents until the next drag
+/// begins, and this runs one turn of the event loop after the drop, on the
+/// thread that owns it.
+///
+/// Every other platform reads its own paths, so this answers with nothing.
+#[cfg(target_os = "macos")]
+fn dropped_paths() -> Vec<PathBuf> {
+    use objc2::ClassType;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardNameDrag};
+    use objc2_foundation::{NSArray, NSURL};
+
+    // SAFETY: `NSPasteboardNameDrag` is AppKit's own name for the pasteboard a
+    // drag is carried on. The classes asked for are a single AppKit class and
+    // no reading options are given, so every object that comes back is an
+    // NSURL. The handler runs on the main thread, which is where AppKit wants
+    // the pasteboard read.
+    let objects = unsafe {
+        let board = NSPasteboard::pasteboardWithName(NSPasteboardNameDrag);
+        let classes = NSArray::from_slice(&[NSURL::class()]);
+        board.readObjectsForClasses_options(&classes, None)
+    };
+    let Some(objects) = objects else {
+        return Vec::new();
+    };
+
+    let mut paths = Vec::new();
+    for object in objects {
+        let Ok(url) = object.downcast::<NSURL>() else {
+            continue;
+        };
+        if !url.isFileURL() {
+            continue;
+        }
+        // Finder can hand over a reference URL, `file:///.file/id=...`, whose
+        // path is that literal string and not a name anything can open.
+        let path = match url.filePathURL() {
+            Some(file) => file.path(),
+            None => url.path(),
+        };
+        if let Some(path) = path {
+            paths.push(PathBuf::from(path.to_string()));
+        }
+    }
+    paths
+}
+
+#[cfg(not(target_os = "macos"))]
+fn dropped_paths() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 fn deliver(app: &AppHandle, files: Vec<(PathBuf, Target)>, focus: bool) {
     let openings: Vec<Opening> = files
         .into_iter()
@@ -1671,10 +1728,28 @@ fn main() {
             }
             if let Some(window) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
-                window.on_window_event(move |event| {
-                    if let WindowEvent::ThemeChanged(theme) = event {
+                window.on_window_event(move |event| match event {
+                    WindowEvent::ThemeChanged(theme) => {
                         let _ = handle.emit("theme-changed", theme_name(*theme));
                     }
+                    // A drop with no paths is not yet an empty drop. Look on
+                    // the pasteboard first, and only then say there was
+                    // nothing to open, because the frontend cannot tell the
+                    // two apart and silence reads as a dead viewer.
+                    WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. })
+                        if paths.is_empty() =>
+                    {
+                        let files: Vec<(PathBuf, Target)> = dropped_paths()
+                            .into_iter()
+                            .map(|path| (path, Target::default()))
+                            .collect();
+                        if files.is_empty() {
+                            let _ = handle.emit("drop-empty", ());
+                        } else {
+                            deliver(&handle, files, true);
+                        }
+                    }
+                    _ => {}
                 });
             }
             spawn_watcher(app.handle().clone());

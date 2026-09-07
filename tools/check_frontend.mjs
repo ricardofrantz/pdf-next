@@ -641,10 +641,26 @@ assert.match(
 
 // A drop that brings no paths must say so. It is the one way into the app
 // that can fail without raising anything, and silence reads as a dead app.
+// The frontend waits for the Rust side, which looks on the pasteboard first.
 assert.match(
   app,
-  /listen\('tauri:\/\/drag-drop'[\s\S]*?paths\.length === 0[\s\S]*?setStatus\(/,
-  'A drop with no paths must report itself; doing nothing looks like a broken viewer.',
+  /listen\('drop-empty'[\s\S]*?setStatus\(/,
+  'A drop the Rust side found nothing for must report itself; silence looks like a broken viewer.',
+);
+assert.match(
+  main,
+  /WindowEvent::DragDrop\(DragDropEvent::Drop \{ paths, \.\. \}\)[\s\S]*?paths\.is_empty\(\)/,
+  'An empty drop must be caught in Rust, where the pasteboard can still be read.',
+);
+assert.match(
+  main,
+  /dropped_paths\(\)[\s\S]*?emit\("drop-empty"[\s\S]*?deliver\(&handle, files, true\)/,
+  'A recovered path must be opened, and only a truly empty drop reported as one.',
+);
+assert.match(
+  main,
+  /NSPasteboardNameDrag/,
+  'The recovery must read the drag pasteboard; the general one holds a different thing.',
 );
 
 // The fixtures the smoke test opens, one per kind the viewer claims to show.

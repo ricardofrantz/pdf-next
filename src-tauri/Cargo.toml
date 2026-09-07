@@ -29,6 +29,16 @@ percent-encoding = "2"
 open = "5"
 pulldown-latex = "0.8.0"
 
+# A file dropped on the window arrives as a list of paths that can be empty:
+# macOS carries the names on more than one pasteboard type and the webview
+# reads only the older one. Reading the drag pasteboard directly recovers
+# them. Both crates come in with tauri; the versions are pinned to its own so
+# the interfaces are the same types.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSURL"] }
+
 # The release binary is a GUI-subsystem executable, which has no console of its
 # own; attaching to the parent's is what lets `--help` and `opened …` print.
 [target.'cfg(windows)'.dependencies]

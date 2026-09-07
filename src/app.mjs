@@ -2181,25 +2181,22 @@ let sawDrag = false;
 listen('tauri://drag-enter', () => {
   sawDrag = true;
 });
-
-// A drop is delivered as an event carrying the paths of the files. The
-// event can arrive with none, and this used to open no file and say
-// nothing, which reads as an app that does not work rather than as one
-// drop that brought no name. Say what happened, and name the way in that
-// always works.
+// A drop that brings no paths is not answered here. The Rust side looks for
+// the names where the webview did not, opens them if they are there, and says
+// `drop-empty` when they are not. Answering both would race that.
 listen('tauri://drag-drop', (event) => {
   const paths = event.payload?.paths || [];
-  if (paths.length === 0) {
-    const key = state.platform === 'macos' ? '⌘O' : 'Ctrl+O';
-    setStatus(
-      sawDrag
-        ? `That drop carried no file name. Open it with ${key} instead.`
-        : `Nothing was dropped. Open a file with ${key}.`,
-      { error: true, sticky: true },
-    );
-    return;
-  }
-  void openMany(paths);
+  if (paths.length > 0) void openMany(paths);
+});
+listen('drop-empty', () => {
+  const key = state.platform === 'macos' ? '⌘O' : 'Ctrl+O';
+  setStatus(
+    sawDrag
+      ? `That drop carried no file name. Open it with ${key} instead.`
+      : `Nothing was dropped. Open a file with ${key}.`,
+    { error: true, sticky: true },
+  );
+  sawDrag = false;
 });
 // Registered before startup asks for `pending_files`, so nothing can fall in
 // the gap between the two.
