@@ -15,18 +15,31 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const release = join(root, 'src-tauri', 'target', 'release');
+const target = join(root, 'src-tauri', 'target');
+
+/// Where a build leaves its release output. The release workflow builds macOS
+/// for both architectures at once, which lands under the target triple
+/// instead, and that universal bundle is the one people install — so it is
+/// the one worth testing first.
+const releaseDirs = [
+  join(target, 'universal-apple-darwin', 'release'),
+  join(target, 'release'),
+];
 
 /// The binary a reader would actually start, per platform. On macOS that is
 /// the one inside the bundle: a bare binary is not the app that ships, and
 /// WebKit does not treat the two the same.
 function findBinary() {
-  const candidates =
+  if (process.env.PDF_NEXT_BIN) {
+    return process.env.PDF_NEXT_BIN;
+  }
+  const candidates = releaseDirs.flatMap((release) =>
     process.platform === 'darwin'
       ? [join(release, 'bundle', 'macos', 'pdf-next.app', 'Contents', 'MacOS', 'pdf-next')]
       : process.platform === 'win32'
         ? [join(release, 'pdf-next.exe')]
-        : [join(release, 'pdf-next')];
+        : [join(release, 'pdf-next')],
+  );
   for (const candidate of candidates) {
     if (existsSync(candidate)) {
       return candidate;
