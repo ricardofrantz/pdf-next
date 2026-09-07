@@ -2174,7 +2174,33 @@ async function openMany(items) {
   }
 }
 
-listen('tauri://drag-drop', (event) => openMany(event.payload?.paths || []));
+// Whether the window has ever been told a drag was over it. A drop that
+// brings no file name is a different fault from a drop that never arrives,
+// and the difference is not visible from outside without this.
+let sawDrag = false;
+listen('tauri://drag-enter', () => {
+  sawDrag = true;
+});
+
+// A drop is delivered as an event carrying the paths of the files. The
+// event can arrive with none, and this used to open no file and say
+// nothing, which reads as an app that does not work rather than as one
+// drop that brought no name. Say what happened, and name the way in that
+// always works.
+listen('tauri://drag-drop', (event) => {
+  const paths = event.payload?.paths || [];
+  if (paths.length === 0) {
+    const key = state.platform === 'macos' ? '⌘O' : 'Ctrl+O';
+    setStatus(
+      sawDrag
+        ? `That drop carried no file name. Open it with ${key} instead.`
+        : `Nothing was dropped. Open a file with ${key}.`,
+      { error: true, sticky: true },
+    );
+    return;
+  }
+  void openMany(paths);
+});
 // Registered before startup asks for `pending_files`, so nothing can fall in
 // the gap between the two.
 const openFilesReady = listen('open-files', (event) =>

@@ -639,6 +639,14 @@ assert.match(
   'The first call the boot waits on must be marked, or a hang there looks like a blank window.',
 );
 
+// A drop that brings no paths must say so. It is the one way into the app
+// that can fail without raising anything, and silence reads as a dead app.
+assert.match(
+  app,
+  /listen\('tauri:\/\/drag-drop'[\s\S]*?paths\.length === 0[\s\S]*?setStatus\(/,
+  'A drop with no paths must report itself; doing nothing looks like a broken viewer.',
+);
+
 // The fixtures the smoke test opens, one per kind the viewer claims to show.
 for (const fixture of [
   'tests/fixtures/hello.pdf',
