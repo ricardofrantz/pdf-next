@@ -2343,13 +2343,25 @@ async function renderedPixels() {
 /// Report to the build server whether this launch works, then let it end the
 /// process. Only ever runs under PDF_NEXT_SMOKE; a reader never gets here.
 async function reportSmoke() {
-  const note = failures.length ? ` after: ${failures.join(' | ')}` : '';
+  // Read late, never early. The status bar is where a load that failed
+  // cleanly leaves its reason — the caller catches the rejection and writes
+  // it there, so it never reaches the failure buffer — and the failure may
+  // arrive while this function is still waiting for a page. Without it a
+  // blank window reports only that it is blank, which is the part already
+  // known.
+  const note = () => {
+    const said = (ui.status.textContent || '').trim();
+    return (
+      (said ? ` status: ${said}` : '') +
+      (failures.length ? ` after: ${failures.join(' | ')}` : '')
+    );
+  };
   try {
     const file = state.file;
     if (!file) {
       await invoke('smoke_report', {
         ok: false,
-        detail: `no file opened${note}`,
+        detail: `no file opened${note()}`,
       });
       return;
     }
@@ -2361,7 +2373,7 @@ async function reportSmoke() {
         ok,
         detail: ok
           ? `${file.name} rendered, ${pages} page${pages === 1 ? '' : 's'}`
-          : `${file.name} did not render: ${pages} pages, painted=${painted}${note}`,
+          : `${file.name} did not render: ${pages} pages, painted=${painted}${note()}`,
       });
       return;
     }
@@ -2375,12 +2387,12 @@ async function reportSmoke() {
       ok: shown,
       detail: shown
         ? `${file.name} rendered (${file.kind})`
-        : `${file.name} did not render (${file.kind})${note}`,
+        : `${file.name} did not render (${file.kind})${note()}`,
     });
   } catch (error) {
     await invoke('smoke_report', {
       ok: false,
-      detail: `smoke check threw: ${error?.message || error}${note}`,
+      detail: `smoke check threw: ${error?.message || error}${note()}`,
     }).catch(() => {});
   }
 }
