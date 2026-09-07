@@ -39,3 +39,17 @@ window.addEventListener('error', (event) => {
 window.addEventListener('unhandledrejection', (event) => {
   remember(`unhandled rejection: ${describe(event.reason)}`);
 });
+
+// PDF.js reports a font, cmap or wasm file it could not fetch by writing to
+// the console and carrying on. Nothing throws, the page just comes up missing
+// its glyphs — which looks the same as a viewer that works, unless somebody
+// is reading the console. Here, somebody is.
+for (const level of ['warn', 'error']) {
+  const original = console[level].bind(console);
+  console[level] = (...parts) => {
+    remember(
+      `console.${level}: ${parts.map((part) => (part instanceof Error ? part.message : String(part))).join(' ')}`,
+    );
+    original(...parts);
+  };
+}
