@@ -2036,4 +2036,52 @@ mod tests {
             assert!(open_link(url.into()).is_err(), "{url} must be refused");
         }
     }
+
+    /// The pasteboard state the recovery is for: the name of a dropped file
+    /// carried only as a file URL, with the older type the webview reads
+    /// absent. Writing it here is what a drop does, so the reader runs against
+    /// the real AppKit pasteboard rather than a stand-in.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_file_url_on_the_drag_pasteboard_is_a_dropped_file() {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardNameDrag, NSPasteboardTypeFileURL};
+        use objc2_foundation::{NSString, NSURL};
+
+        let dir = std::env::temp_dir().join(format!("pdf-next-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A space in the name: a file URL escapes it, and a path must not.
+        let file = dir.join("a b.pdf");
+        std::fs::write(
+            &file,
+            b"%PDF-1.7
+%%EOF
+",
+        )
+        .unwrap();
+
+        // SAFETY: the pasteboard names and types are AppKit's own, and the
+        // drag pasteboard is not in use while no drag is happening.
+        let written = unsafe {
+            let board = NSPasteboard::pasteboardWithName(NSPasteboardNameDrag);
+            board.clearContents();
+            assert!(
+                super::dropped_paths().is_empty(),
+                "an empty pasteboard names no file"
+            );
+
+            let path = NSString::from_str(file.to_str().unwrap());
+            let url = NSURL::fileURLWithPath(&path);
+            board.setString_forType(&url.absoluteString().unwrap(), NSPasteboardTypeFileURL)
+        };
+        assert!(written, "the drag pasteboard refused the file URL");
+
+        let found = super::dropped_paths();
+        assert_eq!(found.len(), 1, "one file was written, {found:?} came back");
+        assert_eq!(
+            std::fs::canonicalize(&found[0]).unwrap(),
+            std::fs::canonicalize(&file).unwrap(),
+        );
+
+        std::fs::remove_file(&file).unwrap();
+    }
 }

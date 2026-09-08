@@ -662,6 +662,11 @@ assert.match(
   /NSPasteboardNameDrag/,
   'The recovery must read the drag pasteboard; the general one holds a different thing.',
 );
+assert.match(
+  main,
+  /fn a_file_url_on_the_drag_pasteboard_is_a_dropped_file/,
+  'The recovery must be run, not only compiled: a drop is the one path no CI can perform.',
+);
 
 // The fixtures the smoke test opens, one per kind the viewer claims to show.
 for (const fixture of [
