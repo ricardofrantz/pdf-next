@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+PackageIdentifier: RicardoFrantz.pdf-next
+PackageVersion: 0.9.1
+InstallerType: nullsoft
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+ReleaseDate: 2026-09-09
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/ricardofrantz/pdf-next/releases/download/v0.9.1/pdf-next_0.9.1_x64-setup.exe
+    InstallerSha256: AA42CE0683BF880207E80A7C631AC893ADB7E328E9AF9FB98E66AF4EE3EADF6C
+    AppsAndFeaturesEntries:
+      - DisplayName: pdf-next
+        DisplayVersion: 0.9.1
+        Publisher: frantz
+        ProductCode: pdf-next
+ManifestType: installer
+ManifestVersion: 1.12.0

@@ -56,8 +56,8 @@ certificates per signature.
 Check one locally before submitting:
 
 ```
-winget validate --manifest winget/RicardoFrantz.pdf-next/0.9.0
-winget install --manifest winget/RicardoFrantz.pdf-next/0.9.0
+winget validate --manifest winget/RicardoFrantz.pdf-next/0.9.1
+winget install --manifest winget/RicardoFrantz.pdf-next/0.9.1
 ```
 
 To publish a version, copy its folder into a fork of winget-pkgs at
