@@ -154,8 +154,10 @@ The repository is signed, so its key is added first:
 
 ```bash
 sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://ricardofrantz.github.io/pdf-next/pdf-next.asc   | sudo tee /etc/apt/keyrings/pdf-next.asc > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/pdf-next.asc] https://ricardofrantz.github.io/pdf-next stable main"   | sudo tee /etc/apt/sources.list.d/pdf-next.list > /dev/null
+curl -fsSL https://ricardofrantz.github.io/pdf-next/pdf-next.asc \
+  | sudo tee /etc/apt/keyrings/pdf-next.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/pdf-next.asc] https://ricardofrantz.github.io/pdf-next stable main" \
+  | sudo tee /etc/apt/sources.list.d/pdf-next.list > /dev/null
 sudo apt update && sudo apt install pdf-next
 ```
 
@@ -171,7 +173,7 @@ Silicon in one file), `.deb`, `.rpm` or `.AppImage` (`chmod +x` and run) for
 Linux.
 
 The builds are not code signed yet, so Windows SmartScreen warns once — *More
-info -> Run anyway* — and macOS quarantines the app and refuses its first
+info → Run anyway* — and macOS quarantines the app and refuses its first
 launch, whether it came from Homebrew or the `.dmg`. Let that copy through
 once:
 
