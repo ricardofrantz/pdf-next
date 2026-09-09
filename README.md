@@ -92,7 +92,7 @@ that survives a build deleting and recreating the file mid-compile.
   sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
   same size follows the first one, as it does in every other viewer. If the machine has nothing
   to print to — no printer, or a stopped print service — it says so rather than opening nothing.
-- **The title says which build you are running** — `paper.pdf — pdf-next 0.9.0` — so a bug report
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.9.1` — so a bug report
   can name a version without hunting for an about box.
 - **Tells you when there is a newer version.** A few seconds after launch the app asks
   GitHub for the latest release, once; if it is newer, the last toolbar button lights up and a
@@ -114,30 +114,74 @@ that survives a build deleting and recreating the file mid-compile.
 | macOS | `brew install --cask ricardofrantz/tap/pdf-next` |
 | Debian, Ubuntu | add the repository below, then `sudo apt install pdf-next` |
 
+### macOS, with Homebrew
+
+The cask lives in a personal tap rather than Homebrew's own repository, so the
+tap is named once. Writing it in full does that for you:
+
+```bash
+brew install --cask ricardofrantz/tap/pdf-next
+```
+
+Or add the tap first and use the short name from then on:
+
+```bash
+brew tap ricardofrantz/tap
+brew install --cask pdf-next
+```
+
+Afterwards:
+
+```bash
+brew upgrade --cask pdf-next     # to the newest release
+brew uninstall --cask pdf-next   # and `brew untap ricardofrantz/tap` to forget the tap
+```
+
+A workflow in the tap reads this repository's releases once a day, so a new
+version arrives there within a day of its tag rather than the moment it lands.
+
+### Windows, with winget
+
+```bash
+winget install RicardoFrantz.pdf-next
+winget upgrade RicardoFrantz.pdf-next
+winget uninstall RicardoFrantz.pdf-next
+```
+
+### Debian and Ubuntu, with apt
+
+The repository is signed, so its key is added first:
+
 ```bash
 sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://ricardofrantz.github.io/pdf-next/pdf-next.asc \
-  | sudo tee /etc/apt/keyrings/pdf-next.asc > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/pdf-next.asc] https://ricardofrantz.github.io/pdf-next stable main" \
-  | sudo tee /etc/apt/sources.list.d/pdf-next.list > /dev/null
+curl -fsSL https://ricardofrantz.github.io/pdf-next/pdf-next.asc   | sudo tee /etc/apt/keyrings/pdf-next.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/pdf-next.asc] https://ricardofrantz.github.io/pdf-next stable main"   | sudo tee /etc/apt/sources.list.d/pdf-next.list > /dev/null
 sudo apt update && sudo apt install pdf-next
 ```
 
-Or take the file itself from [Releases](https://github.com/ricardofrantz/pdf-next/releases):
-`.exe` or `.msi` for Windows, a universal `.dmg` for macOS, `.deb`, `.rpm` or `.AppImage`
-(`chmod +x` and run) for Linux.
+Then `sudo apt upgrade pdf-next` for a new version and `sudo apt remove
+pdf-next` to take it off. Every version stays in the repository, so
+`sudo apt install pdf-next=0.9.0` still installs that one.
 
-The builds are not code signed yet, so Windows SmartScreen warns once — *More info → Run
-anyway* — and macOS quarantines the app and refuses its first launch, whether it came from
-Homebrew or the `.dmg`. Let that copy through once:
+### The file itself
+
+Or take it from [Releases](https://github.com/ricardofrantz/pdf-next/releases):
+`.exe` or `.msi` for Windows, a universal `.dmg` for macOS (Intel and Apple
+Silicon in one file), `.deb`, `.rpm` or `.AppImage` (`chmod +x` and run) for
+Linux.
+
+The builds are not code signed yet, so Windows SmartScreen warns once — *More
+info -> Run anyway* — and macOS quarantines the app and refuses its first
+launch, whether it came from Homebrew or the `.dmg`. Let that copy through
+once:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/pdf-next.app
 ```
 
 Signing, and how each of these channels is published, are described in
-[docs/distribution.md](./docs/distribution.md); what the app does with the network, in
-[PRIVACY.md](./PRIVACY.md).
+[docs/distribution.md](./docs/distribution.md); what the app does with the
+network, in [PRIVACY.md](./PRIVACY.md).
 
 Then open a file by double-clicking it, dragging it onto the window, pressing `Ctrl+O`, or
 passing a path:
@@ -316,9 +360,30 @@ sudo apt-get install libwebkit2gtk-4.1-dev build-essential curl wget file \
   libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
-`node tools/check_frontend.mjs` enforces the invariants that are easy to break silently: a real
-PDF.js worker, streaming instead of whole-file reads, the canvas budget, the one-second poll,
-and the mid-build gap behaviour.
+### Tests
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml   # the Rust side
+node tools/check_frontend.mjs                     # the frontend contracts
+bun run build && node tools/smoke.mjs             # open every fixture, for real
+```
+
+`check_frontend.mjs` enforces the invariants that are easy to break silently: a real PDF.js
+worker, streaming instead of whole-file reads, the canvas budget, the one-second poll, and the
+mid-build gap behaviour.
+
+`tools/smoke.mjs` launches the binary that was just built, once per file in `tests/fixtures`,
+with `PDF_NEXT_SMOKE=1` in the environment. In that mode the app answers for itself: it waits
+for a page to be drawn with pixels in it, then reports through a Tauri command and exits on
+that answer, so a window that opens and stays empty fails the run instead of passing it.
+`PDF_NEXT_SMOKE_TIMEOUT` bounds a launch that never reports; `PDF_NEXT_BIN` names a binary
+somewhere else.
+
+The fixtures are built by `python3 tests/make_fixtures.py`, which writes the same bytes on
+every machine, so a change to them is a change someone made.
+
+All three run on Windows, macOS and Linux for every push, and a release stays a draft until
+each platform's bundle has opened a document.
 
 ## Scope
 
