@@ -51,6 +51,7 @@ const ui = {
   mode: el('mode'),
   wrap: el('wrap'),
   raw: el('raw'),
+  ask: el('ask'),
   dockButtons: {
     left: el('dockLeft'),
     right: el('dockRight'),
@@ -86,6 +87,10 @@ const ui = {
   printPages: el('printPages'),
   printRules: el('printRules'),
   status: el('status'),
+  note: el('note'),
+  noteRef: el('noteRef'),
+  noteText: el('noteText'),
+  noteSave: el('noteSave'),
 };
 
 const state = {
@@ -118,6 +123,10 @@ const state = {
   tabs: [],
   active: -1,
   views: new Map(),
+  // Blocks extracted from rendered markdown, per path: { path, texts: string[] }
+  markdownBlocks: null,
+  pendingNote: null,
+  notesPath: null,
 };
 
 // One worker for the life of the process. getDocument would otherwise spawn a
@@ -508,6 +517,120 @@ function imageContainScale() {
   );
 }
 
+// ─ Markdown reload highlighting ────────────────────────────────────────
+// Falsifiers: (1) edit one paragraph → exactly one block marked;
+// (2) reload with no edit → none; (3) insert a paragraph above → only
+// the new one marked.
+
+/// LCS-based diff: returns indices into `after` array that are new or changed.
+/// Pure function, no side effects. O(n·m) time, capped at 4000×4000 to avoid
+/// pathological cases.
+function changedIndices(before, after) {
+  const n = Math.min(before.length, 4000);
+  const m = Math.min(after.length, 4000);
+
+  // Build LCS table.
+  const dp = Array(n + 1)
+    .fill(0)
+    .map(() => Array(m + 1).fill(0));
+
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (before[i - 1] === after[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  // Mark which elements of `after` are in the LCS.
+  const used = Array(m).fill(false);
+  let i = n,
+    j = m;
+  while (i > 0 && j > 0) {
+    if (before[i - 1] === after[j - 1]) {
+      used[j - 1] = true;
+      i--;
+      j--;
+    } else if (dp[i - 1][j] > dp[i][j - 1]) {
+      i--;
+    } else {
+      j--;
+    }
+  }
+
+  // Return indices of elements NOT in the LCS.
+  return Array.from({ length: m }, (_, i) => (used[i] ? null : i)).filter(
+    (i) => i !== null
+  );
+}
+
+/// Extract { element, text } pairs from the markdown article.
+/// element = owner of the anchor (anchor's parent for p/li/h/blockquote/pre,
+/// or next sibling for table/math). text = element.textContent with
+/// whitespace collapsed.
+function markdownBlocks(article) {
+  const blocks = [];
+  const anchors = article.querySelectorAll('span.src[data-line]');
+
+  for (const anchor of anchors) {
+    let element = anchor.parentElement;
+
+    // If anchor is first child, element is the parent.
+    // Otherwise, anchor precedes a table/math, so use next sibling.
+    if (anchor.previousElementSibling === null) {
+      // Anchor is first child, parent is the block.
+      // element is already set.
+    } else {
+      // Anchor has preceding siblings or is not first, so it precedes the block.
+      element = anchor.nextElementSibling || anchor.parentElement;
+    }
+
+    if (element && element !== anchor) {
+      const text = element.textContent.trim().replace(/\s+/g, ' ');
+      blocks.push({ element, text });
+    }
+  }
+
+  return blocks;
+}
+
+/// Apply highlight to changed blocks. Changes fade out after ~3s.
+let highlightTimeout = 0;
+function highlightChangedBlocks(indices, blocks) {
+  if (highlightTimeout) {
+    window.clearTimeout(highlightTimeout);
+  }
+
+  // Apply the 'changed' class to mark blocks.
+  for (const idx of indices) {
+    if (blocks[idx]) {
+      blocks[idx].element.classList.add('changed');
+    }
+  }
+
+  // Force reflow to establish the initial state.
+  void blocks[0]?.element.offsetWidth;
+
+  // Add the fade class and set up removal.
+  window.requestAnimationFrame(() => {
+    for (const idx of indices) {
+      if (blocks[idx]) {
+        blocks[idx].element.classList.add('changed-fade');
+      }
+    }
+
+    highlightTimeout = window.setTimeout(() => {
+      for (const idx of indices) {
+        if (blocks[idx]) {
+          blocks[idx].element.classList.remove('changed', 'changed-fade');
+        }
+      }
+    }, 3200);
+  });
+}
+
 // ── Markdown ──────────────────────────────────────────────────────────────
 
 // A reading column plus its margins. The window a fresh markdown file opens
@@ -551,10 +674,32 @@ async function showMarkdown(file, view, generation, fit) {
   if (state.generation !== generation) {
     return;
   }
+  // innerHTML replaces the article, so a previous mark.aim is gone with it.
   ui.markdown.innerHTML = doc.html;
   ui.markdownRaw.textContent = doc.raw;
   setRaw(view?.raw ?? state.markdownRaw, { persist: false });
   setMarkdownScale(view?.scale || 1);
+
+  // Highlight changed blocks on reload.
+  const newBlocks = markdownBlocks(ui.markdown);
+  const isReload =
+    state.markdownBlocks &&
+    state.markdownBlocks.path === file.path &&
+    newBlocks.length > 0;
+
+  if (isReload && state.markdownBlocks.texts.length > 0) {
+    const newTexts = newBlocks.map((b) => b.text);
+    const changed = changedIndices(state.markdownBlocks.texts, newTexts);
+    if (changed.length > 0) {
+      highlightChangedBlocks(changed, newBlocks);
+    }
+  }
+
+  // Store blocks for the next reload.
+  state.markdownBlocks = {
+    path: file.path,
+    texts: newBlocks.map((b) => b.text),
+  };
   // Measured with the content laid out; used by undock as well as the fit.
   state.natural = {
     width: MARKDOWN_WINDOW_WIDTH,
@@ -957,8 +1102,9 @@ async function openPath(path, { activate = true, target = null } = {}) {
 // ── Landing somewhere in particular ───────────────────────────────────────
 //
 // `pdf-next paper.pdf --page 12`, or the same written as a link,
-// `paper.pdf#page=12&search=Figure%203`. The fields are the ones PDF links
-// have used for years, so a reference that opens in a browser opens here.
+// `paper.pdf#page=12&search=Figure%203`. Markdown uses `--line` / `#line=`
+// the same way. The PDF fields are the ones links have used for years, so a
+// reference that opens in a browser opens here.
 
 /// Keep only the fields that say something, and nothing at all if none do.
 /// Rust sends every field on every open, most of them null.
@@ -967,9 +1113,10 @@ function asTarget(value) {
     return null;
   }
   const page = Number.isFinite(value.page) && value.page >= 1 ? Math.round(value.page) : null;
+  const line = Number.isFinite(value.line) && value.line >= 1 ? Math.round(value.line) : null;
   const nameddest = value.nameddest || null;
   const search = value.search || null;
-  return page || nameddest || search ? { page, nameddest, search } : null;
+  return page || line || nameddest || search ? { page, line, nameddest, search } : null;
 }
 
 /// A file to open, however it arrived: a bare path from a drop or an Apple
@@ -985,9 +1132,82 @@ function asOpening(value) {
 /// Land where the caller asked. Called once the document is up, because a page
 /// number means nothing to PDF.js before there are pages, and because a search
 /// runs from the page you are on — so `#page=5&search=Figure` finds the first
-/// "Figure" at or after page 5.
+/// "Figure" at or after page 5. Markdown uses `#line=12` the same way, then
+/// searches from that block onward.
 async function applyTarget(target) {
-  if (!target || state.file?.kind !== 'pdf' || !state.document) {
+  if (!target) {
+    return;
+  }
+  if (state.file?.kind === 'markdown') {
+    // Line anchors live on the rendered article, not the raw source column.
+    setRaw(false, { persist: false });
+    for (const mark of ui.markdown.querySelectorAll('mark.aim')) {
+      const parent = mark.parentNode;
+      if (!parent) {
+        continue;
+      }
+      while (mark.firstChild) {
+        parent.insertBefore(mark.firstChild, mark);
+      }
+      mark.remove();
+      parent.normalize();
+    }
+    let from = null;
+    if (target.line) {
+      const anchors = ui.markdown.querySelectorAll('[data-line]');
+      for (const anchor of anchors) {
+        if (Number(anchor.dataset.line) >= target.line) {
+          from =
+            anchor.parentElement && anchor.parentElement !== ui.markdown
+              ? anchor.parentElement
+              : anchor;
+          break;
+        }
+      }
+      if (from) {
+        from.scrollIntoView({ block: 'start' });
+      } else {
+        ui.markdownStage.scrollTop = ui.markdownStage.scrollHeight;
+        setStatus(`Line ${target.line} is past the end`);
+      }
+    }
+    if (target.search) {
+      const needle = target.search.toLowerCase();
+      const walker = document.createTreeWalker(ui.markdown, NodeFilter.SHOW_TEXT);
+      let node;
+      let marked = false;
+      while ((node = walker.nextNode())) {
+        if (
+          from &&
+          from !== node &&
+          !from.contains(node) &&
+          !(from.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)
+        ) {
+          continue;
+        }
+        const text = node.nodeValue;
+        const index = text.toLowerCase().indexOf(needle);
+        if (index < 0) {
+          continue;
+        }
+        const matched = node.splitText(index);
+        matched.splitText(target.search.length);
+        const mark = document.createElement('mark');
+        mark.className = 'aim';
+        const range = document.createRange();
+        range.selectNode(matched);
+        range.surroundContents(mark);
+        mark.scrollIntoView({ block: 'center' });
+        marked = true;
+        break;
+      }
+      if (!marked) {
+        setStatus(`No match for "${target.search}"`);
+      }
+    }
+    return;
+  }
+  if (state.file?.kind !== 'pdf' || !state.document) {
     return;
   }
   if (target.nameddest) {
@@ -1226,6 +1446,8 @@ async function closeAll() {
   updateSiblingControls();
   renderTabs();
   closeFind();
+  ui.note.hidden = true;
+  ui.noteText.value = '';
   setStatus('');
 }
 
@@ -1678,6 +1900,214 @@ function setDocked(edge) {
   }
 }
 
+
+// ── Selection and Ask ─────────────────────────────────────────────────────
+
+/// Find the basename of a file from its path.
+function basenameFromPath(path) {
+  if (!path) return 'file';
+  const match = path.match(/[/\\]([^/\\]*)$/);
+  return match ? match[1] : path;
+}
+
+/// Describe the current selection: return { reference, text } or null.
+function describeSelection() {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) {
+    return null;
+  }
+  const text = selection.toString().trim();
+  if (!text) {
+    return null;
+  }
+
+  const basename = state.file ? basenameFromPath(state.file.path) : 'file';
+
+  if (state.file?.kind === 'markdown') {
+    // For markdown, find the data-line anchors for start and end of selection.
+    let startLine = null;
+    let endLine = null;
+
+    const startNode = selection.anchorNode;
+    const endNode = selection.focusNode;
+
+    if (startNode && endNode) {
+      // Try closest first for each node
+      let el = startNode.nodeType === 3 ? startNode.parentElement : startNode;
+      let anchor = el?.closest('[data-line]');
+      if (anchor) {
+        startLine = Number(anchor.dataset.line);
+      } else {
+        // Use TreeWalker to find the last [data-line] before startNode
+        const walker = document.createNodeIterator(
+          ui.markdown,
+          NodeFilter.SHOW_ELEMENT,
+          (node) => {
+            if (!node.hasAttribute('data-line')) {
+              return NodeFilter.FILTER_SKIP;
+            }
+            if (node.compareDocumentPosition(startNode) & Node.DOCUMENT_POSITION_FOLLOWING) {
+              return NodeFilter.FILTER_ACCEPT;
+            }
+            return NodeFilter.FILTER_SKIP;
+          },
+        );
+        let node;
+        let lastAnchor = null;
+        while ((node = walker.nextNode())) {
+          lastAnchor = node;
+        }
+        if (lastAnchor) {
+          startLine = Number(lastAnchor.dataset.line);
+        }
+      }
+
+      el = endNode.nodeType === 3 ? endNode.parentElement : endNode;
+      anchor = el?.closest('[data-line]');
+      if (anchor) {
+        endLine = Number(anchor.dataset.line);
+      } else {
+        const walker = document.createNodeIterator(
+          ui.markdown,
+          NodeFilter.SHOW_ELEMENT,
+          (node) => {
+            if (!node.hasAttribute('data-line')) {
+              return NodeFilter.FILTER_SKIP;
+            }
+            if (node.compareDocumentPosition(endNode) & Node.DOCUMENT_POSITION_FOLLOWING) {
+              return NodeFilter.FILTER_ACCEPT;
+            }
+            return NodeFilter.FILTER_SKIP;
+          },
+        );
+        let node;
+        let lastAnchor = null;
+        while ((node = walker.nextNode())) {
+          lastAnchor = node;
+        }
+        if (lastAnchor) {
+          endLine = Number(lastAnchor.dataset.line);
+        }
+      }
+
+      // Determine the range
+      if (startLine !== null && endLine !== null) {
+        const minLine = Math.min(startLine, endLine);
+        const maxLine = Math.max(startLine, endLine);
+        const reference = minLine === maxLine ? `${basename}:${minLine}` : `${basename}:${minLine}-${maxLine}`;
+        return { reference, text };
+      }
+    }
+
+    // If no anchor found, just return the basename
+    return { reference: basename, text };
+  }
+
+  if (state.file?.kind === 'pdf') {
+    // For PDF, find the page number from the start container.
+    const startContainer = selection.getRangeAt(0).startContainer;
+    const pageEl = startContainer.nodeType === 3
+      ? startContainer.parentElement?.closest('.page')
+      : startContainer.closest('.page');
+    const pageNum = pageEl?.dataset.pageNumber;
+
+    if (pageNum) {
+      const endContainer = selection.getRangeAt(selection.rangeCount - 1).endContainer;
+      const endPageEl = endContainer.nodeType === 3
+        ? endContainer.parentElement?.closest('.page')
+        : endContainer.closest('.page');
+      const endPageNum = endPageEl?.dataset.pageNumber;
+
+      if (endPageNum && endPageNum !== pageNum) {
+        const reference = `${basename} p.${pageNum}-${endPageNum}`;
+        return { reference, text };
+      }
+
+      const reference = `${basename} p.${pageNum}`;
+      return { reference, text };
+    }
+
+    return { reference: basename, text };
+  }
+
+  // Image: return null
+  return null;
+}
+
+/// Normalise text for clipboard: collapse spaces, collapse long newlines, cap at 20k, format as quote.
+function normaliseText(text) {
+  // Collapse runs of spaces/tabs to one space
+  let normalized = text.replace(/[ \t]+/g, ' ');
+  // Collapse 3+ newlines to 2
+  normalized = normalized.replace(/\n{3,}/g, '\n\n');
+  // Trim
+  normalized = normalized.trim();
+  // Cap at 20000 characters
+  if (normalized.length > 20000) {
+    normalized = normalized.substring(0, 20000) + '…';
+  }
+  return normalized;
+}
+
+/// Copy the selection with its source reference to clipboard.
+function openNoteBox() {
+  const picked = describeSelection();
+  if (!picked) {
+    setStatus('Select some text first');
+    return;
+  }
+
+  state.pendingNote = picked;
+  ui.note.hidden = false;
+  ui.noteRef.textContent = picked.reference;
+  ui.noteText.focus();
+}
+
+async function saveNote() {
+  if (!state.pendingNote) {
+    return;
+  }
+
+  const comment = ui.noteText.value.trim();
+
+  try {
+    const notesPath = await invoke('append_note', {
+      document: state.file.path,
+      reference: state.pendingNote.reference,
+      quote: state.pendingNote.text,
+      comment,
+    });
+    setStatus(`Note saved to ${basenameFromPath(notesPath)}`);
+    state.notesPath = notesPath;
+    ui.note.hidden = true;
+    ui.noteText.value = '';
+  } catch (error) {
+    setStatus(String(error), { error: true });
+  }
+}
+
+async function askSelection() {
+  const picked = describeSelection();
+  if (!picked) {
+    setStatus('Select some text first');
+    return;
+  }
+
+  const { reference, text } = picked;
+  const normalized = normaliseText(text);
+  const lines = normalized.split('\n');
+  const quoted = lines.map((line) => `> ${line}`).join('\n');
+  const payload = `${reference}\n${quoted}\n`;
+
+  try {
+    await navigator.clipboard.writeText(payload);
+    const lineCount = lines.length;
+    const s = lineCount === 1 ? '' : 's';
+    setStatus(`Copied ${lineCount} line${s} for the session`);
+  } catch {
+    setStatus('Clipboard refused the text', { error: true });
+  }
+}
 // ── Wiring ────────────────────────────────────────────────────────────────
 
 ui.open.addEventListener('click', async () => {
@@ -1837,6 +2267,22 @@ async function checkForUpdates({ quiet = false } = {}) {
 ui.update.addEventListener('click', () => checkForUpdates());
 ui.wrap.addEventListener('click', toggleWrap);
 ui.raw.addEventListener('click', () => setRaw(!state.markdownRaw));
+ui.ask.addEventListener('click', () => void askSelection());
+ui.note.addEventListener('click', () => void openNoteBox());
+ui.notes.addEventListener('click', () => {
+  if (!state.file) {
+    setStatus('No file open');
+    return;
+  }
+  // Compute sidecar path: same directory, <stem>.notes.md
+  const path = state.file.path;
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  const dir = path.slice(0, cut + 1);
+  const file = path.slice(cut + 1);
+  const stem = file.split('.').slice(0, -1).join('.');
+  const notesPath = dir + stem + '.notes.md';
+  void openPath(notesPath);
+});
 
 // A link in a markdown file must not leave the page. A relative one —
 // `[notes](other.md)` — resolves against the app origin, which the navigation
@@ -1977,6 +2423,20 @@ ui.findInput.addEventListener('keydown', (event) => {
   }
 });
 
+ui.noteText.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    void saveNote();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    ui.note.hidden = true;
+    ui.noteText.value = '';
+  }
+});
+
+ui.noteSave.addEventListener('click', () => void saveNote());
+
+
 eventBus.on('pagechanging', updatePageControls);
 eventBus.on('pagesloaded', updatePageControls);
 eventBus.on('scalechanging', (event) => {
@@ -2030,6 +2490,20 @@ window.addEventListener('keydown', (event) => {
     event.preventDefault();
     void toggleWrap();
     return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 'a') {
+    if (!typing) {
+      event.preventDefault();
+      void askSelection();
+      return;
+    }
+  }
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 'n') {
+    if (!typing) {
+      event.preventDefault();
+      void openNoteBox();
+      return;
+    }
   }
   if ((event.ctrlKey || event.metaKey) && key === 'u') {
     event.preventDefault();

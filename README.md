@@ -67,6 +67,10 @@ that survives a build deleting and recreating the file mid-compile.
   [pulldown-latex](https://github.com/carloskiki/pulldown-latex) in the same Rust pass and set
   in Latin Modern — no JavaScript math engine, nothing fetched, and the MathML meets the same
   sanitizer as the prose.
+- **Markdown typography:** Rendered text is set in Latin Modern Roman at 17 px on a 38 em measure, hyphenated with `text-wrap: pretty` for natural word breaks. Zoom reflows the text rather than scaling it.
+- **Ask** (`Ctrl+Shift+A`): Copy a selection as a Markdown quote headed by its source: `collab.md:12-18` for Markdown, `paper.pdf p.7` for PDFs. Paste into an AI chat to refine the text; line numbers let you edit exactly that part and see the live reload. Capped at 20,000 characters; not available for images.
+- **Notes** (`Ctrl+Shift+N`): Select text, press the key, type a comment. It appends to `<stem>.notes.md` next to the file as a `## reference` heading, the quoted text, and your comment. A "notes" button opens that file as a tab; it reloads as you add notes. The app writes only that one file and refuses to write notes about a notes file.
+- **Changed blocks light up on reload:** When a Markdown file rewrites, changed and new paragraphs, headings, list items, tables and equations fade from a highlight over a few seconds. The comparison is by content: adding a paragraph marks only that one. Scroll position is kept.
 - **Links go where you would expect.** A `#heading` or footnote scrolls; a web link opens in
   your browser; a relative link — `[notes](other.md)`, `[fig](fig1.png)`, the paper it
   cites — opens as a new tab, if it is a kind pdf-next shows. Nothing ever navigates the
@@ -79,9 +83,9 @@ that survives a build deleting and recreating the file mid-compile.
 - **Text search** with match counts, powered by PDF.js.
 - **Opens at a page, or at a figure.** `--page 12`, `--find "Figure 3"` and `--dest results`
   say where to land, and the same thing can be written on the path the way a PDF link is —
-  `paper.pdf#page=7&search=wake`. A file already open is aimed rather than opened twice, so a
+  `paper.pdf#page=7&search=wake`. For Markdown, `--line 42` or `#line=42` aim at the first block at or after that line; `--find` and `#search=` also work on Markdown. A file already open is aimed rather than opened twice, so a
   running window jumps to the page you asked for; `--no-focus` hands a file over without
-  raising the window. The `opened` line prints the fragment that was understood, which is what
+  raising the window. The `opened` line prints the fragment that was understood (including `line=N` for Markdown), which is what
   lets a script — or an agent — check rather than assume.
 - **Print with `Ctrl+P`**, to the system's own dialog — the real one, with your printer list,
   page range, copies, duplex, paper size and scaling. pdf-next adds no print settings of its
@@ -102,10 +106,9 @@ that survives a build deleting and recreating the file mid-compile.
   own, downloads only ever happen on a press, and GitHub is the only host it can reach.
 - **Keyboard first:** `j`/`k` scroll, `n`/`p` pages, `g`/`G` first and last, `+`/`-` zoom,
   `←`/`→` tabs (or folder, with one file open), `Ctrl+W` close, `Ctrl+F` find, `Ctrl+R` reload,
-  `Ctrl+O` open, `Ctrl+P` print, `Ctrl+U` raw markdown,
+  `Ctrl+O` open, `Ctrl+P` print, `Ctrl+U` raw markdown, `Ctrl+Shift+A` ask, `Ctrl+Shift+N` notes,
   `Ctrl+Shift+F` fit window to content,
   `Ctrl+Shift+←`/`→`/`↑`/`↓` dock to a screen half, `Ctrl+Shift+Enter` undock.
-
 ## Install
 
 | System | Command |

@@ -349,6 +349,31 @@ assert.match(
 );
 assert.match(
   main,
+  /"--line" => match arguments[\s\S]*?aimed_at\(&mut invocation\)\.line = Some\(line\)/,
+  '--line must bind a 1-based source line the same way --page binds a page.',
+);
+assert.match(
+  main,
+  /"line" => target\.line = value\.parse\(\)\.ok\(\)\.filter\(\|line\| \*line >= 1\)/,
+  'A path fragment must accept line=N for Markdown.',
+);
+assert.match(
+  app,
+  /const line = Number\.isFinite\(value\.line\) && value\.line >= 1 \? Math\.round\(value\.line\) : null/,
+  'asTarget must keep a 1-based line so Markdown can be aimed.',
+);
+assert.match(
+  app,
+  /async function applyTarget\(target\)[\s\S]*?kind === 'markdown'[\s\S]*?mark\.aim[\s\S]*?\[data-line\][\s\S]*?scrollIntoView/,
+  'A Markdown target must scroll to the source line and mark the first search match.',
+);
+assert.match(
+  styles,
+  /mark\.aim \{[\s\S]*?background: var\(--aim-highlight\)/,
+  'The Markdown search mark must use the aim-highlight token.',
+);
+assert.match(
+  main,
   /_ if text\.starts_with\('-'\) && text\.len\(\) > 1 => \{\s*return Err\(\(2,/,
   'An unknown flag must fail with exit status 2.',
 );

@@ -21,6 +21,8 @@
   --live: #1a7f4b;
   --error: #c4241a;
   --page-ring: 30%;
+  --aim-highlight: rgba(255, 213, 0, 0.55);
+  --changed-highlight: rgba(100, 200, 255, 0.4);
 
   --bar-height: 36px;
   --control-height: 26px;
@@ -49,6 +51,8 @@
   --live: #6fce9d;
   --error: #f0877a;
   --page-ring: 26%;
+  --aim-highlight: rgba(255, 179, 0, 0.5);
+  --changed-highlight: rgba(100, 150, 255, 0.35);
 }
 
 :root[data-theme='light'] {
@@ -75,7 +79,14 @@
     --live: #6fce9d;
     --error: #f0877a;
     --page-ring: 26%;
+    --aim-highlight: rgba(255, 179, 0, 0.5);
+    --changed-highlight: rgba(100, 150, 255, 0.35);
   }
+}
+
+mark.aim {
+  background: var(--aim-highlight);
+  color: inherit;
 }
 
 * {
@@ -532,6 +543,50 @@ body.mode-invert .pdfViewer .page .canvasWrapper {
   font-variant-numeric: tabular-nums;
 }
 
+
+#note {
+  position: absolute;
+  top: 10px;
+  right: 16px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--widget-border);
+  border-radius: 4px;
+  background: var(--widget);
+  box-shadow: 0 4px 16px var(--shadow);
+}
+
+#note[hidden] {
+  display: none;
+}
+
+#noteRef {
+  font-size: 0.85em;
+  opacity: 0.7;
+  margin-bottom: 2px;
+}
+
+#noteText {
+  width: 200px;
+  padding: 2px 4px;
+  border: 1px solid var(--widget-border);
+  border-radius: 2px;
+}
+
+#noteSave {
+  padding: 2px 8px;
+  border: 1px solid var(--widget-border);
+  border-radius: 2px;
+  background: var(--widget);
+  cursor: pointer;
+}
+
+#noteSave:hover {
+  background: var(--widget-hover);
+}
 /* ── Status and empty state ──────────────────────────────────────────── */
 #status {
   position: absolute;
@@ -609,6 +664,34 @@ body:not(.kind-markdown) .md-only {
   display: none;
 }
 
+body.kind-image .not-image {
+  display: none;
+}
+
+/* Latin Modern Roman typeface for markdown body text */
+@font-face {
+  font-family: "Latin Modern Roman";
+  src: url('./vendor/pulldown-latex/font/lmroman12-regular.woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Latin Modern Roman";
+  src: url('./vendor/pulldown-latex/font/lmroman12-bold.woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Latin Modern Roman";
+  src: url('./vendor/pulldown-latex/font/lmroman12-italic.woff2');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
+
 /* ── Markdown ────────────────────────────────────────────────────────── */
 /* The prose sits on a page, like a PDF does: white in every theme, recoloured
    only by an explicit page mode. Tokens rather than rules per mode, so the
@@ -680,8 +763,15 @@ body.mode-sepia #markdownStage {
 }
 
 #markdown {
-  font-size: 15px;
-  line-height: 1.6;
+  font-family: "Latin Modern Roman", Georgia, "Times New Roman", serif;
+  font-size: 17px;
+  line-height: 1.5;
+  max-width: 38em;
+  margin-left: auto;
+  margin-right: auto;
+  hyphens: auto;
+  text-wrap: pretty;
+  text-align: left;
 }
 
 #markdown > :first-child {
@@ -984,4 +1074,14 @@ body.mode-sepia #markdownStage {
   font-size: 0.75em;
   vertical-align: 0.15em;
   opacity: 0.7;
+}
+
+/* Changed block highlight - fades out over 3 seconds */
+#markdown .changed {
+  background: var(--changed-highlight);
+  transition: background 2.5s ease-out 0.5s;
+}
+
+#markdown .changed.changed-fade {
+  background: transparent;
 }

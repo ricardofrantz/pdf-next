@@ -68,14 +68,16 @@ struct WatchEvent {
 }
 
 /// Where in a document to land: the fragment on a path
-/// (`paper.pdf#page=12&search=Figure%203`), or the flags that say the same
-/// thing. The field names are the ones RFC 8118 defines for PDF links, so a
-/// reference that works in a browser works here too. A key this viewer has no
-/// answer for — `zoom`, `view`, `viewrect` — is dropped rather than refused,
-/// because a fragment is a hint and the file still opens without it.
+/// (`paper.pdf#page=12&search=Figure%203`, `notes.md#line=12`), or the flags
+/// that say the same thing. `page`, `nameddest` and `search` are the RFC 8118
+/// names for PDF links, so a browser reference opens here too. `line` is the
+/// Markdown counterpart of `page`. A key this viewer has no answer for —
+/// `zoom`, `view`, `viewrect` — is dropped rather than refused, because a
+/// fragment is a hint and the file still opens without it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 struct Target {
     page: Option<u32>,
+    line: Option<u32>,
     nameddest: Option<String>,
     search: Option<String>,
 }
@@ -100,6 +102,9 @@ impl Target {
         if let Some(page) = self.page {
             fields.push(format!("page={page}"));
         }
+        if let Some(line) = self.line {
+            fields.push(format!("line={line}"));
+        }
         if let Some(destination) = &self.nameddest {
             fields.push(format!("nameddest={}", escape_fragment(destination)));
         }
@@ -116,6 +121,9 @@ impl Target {
         if other.page.is_some() {
             self.page = other.page;
         }
+        if other.line.is_some() {
+            self.line = other.line;
+        }
         if other.nameddest.is_some() {
             self.nameddest = other.nameddest;
         }
@@ -129,7 +137,7 @@ fn escape_fragment(text: &str) -> String {
     percent_encoding::utf8_percent_encode(text, FRAGMENT_ESCAPES).to_string()
 }
 
-/// Read `page=12&search=Figure%203`.
+/// Read `page=12&search=Figure%203` or `line=12&search=wake`.
 fn parse_fragment(fragment: &str) -> Target {
     let mut target = Target::default();
     for field in fragment.split('&').filter(|field| !field.is_empty()) {
@@ -139,6 +147,7 @@ fn parse_fragment(fragment: &str) -> Target {
             .to_string();
         match key.to_ascii_lowercase().as_str() {
             "page" => target.page = value.parse().ok().filter(|page| *page >= 1),
+            "line" => target.line = value.parse().ok().filter(|line| *line >= 1),
             "nameddest" | "dest" if !value.is_empty() => target.nameddest = Some(value),
             "search" | "find" if !value.is_empty() => target.search = Some(value),
             _ => {}
@@ -683,8 +692,48 @@ fn keep_known_styles<'a>(
     every_declaration_known.then_some(std::borrow::Cow::Borrowed(value))
 }
 
+/// Compute byte offsets of line starts (1-based line numbers).
+/// Treats both "\n" and "\r\n" as line separators.
+fn line_start_offsets(source: &str) -> Vec<usize> {
+    let mut offsets = vec![0]; // Line 1 starts at byte 0
+    let mut i = 0;
+    let bytes = source.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            offsets.push(i + 1);
+            i += 1;
+        } else if i + 1 < bytes.len() && bytes[i] == b'\r' && bytes[i + 1] == b'\n' {
+            offsets.push(i + 2);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    offsets
+}
+
+/// Find the 1-based line number for a byte offset.
+fn line_at_offset(offsets: &[usize], offset: usize) -> usize {
+    match offsets.binary_search(&offset) {
+        Ok(idx) => idx + 1,
+        Err(idx) => {
+            if idx == 0 {
+                1
+            } else {
+                idx
+            }
+        }
+    }
+}
+
+/// Check if raw HTML contains "data-line" (case-insensitive).
+/// Our injected anchors are the only HTML allowed to carry data-line attributes.
+fn hides_anchor(html: &str) -> bool {
+    html.to_ascii_lowercase().contains("data-line")
+}
+
 fn render_markdown(source: &str) -> String {
-    use pulldown_cmark::{html, Event, Options, Parser};
+    use pulldown_cmark::{html, Event, Options, Parser, Tag};
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -693,14 +742,67 @@ fn render_markdown(source: &str) -> String {
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
     options.insert(Options::ENABLE_MATH);
 
+    let line_offsets = line_start_offsets(source);
+
     // `$…$` and `$$…$$` become MathML in the same stream, and the sanitizer
     // reads them along with everything else.
     let mut rendered = String::with_capacity(source.len() + source.len() / 2);
-    let events = Parser::new_ext(source, options).map(|event| match event {
-        Event::InlineMath(tex) => Event::Html(render_math(&tex, false).into()),
-        Event::DisplayMath(tex) => Event::Html(render_math(&tex, true).into()),
-        other => other,
+    let events_with_offset = Parser::new_ext(source, options).into_offset_iter();
+
+    let events = events_with_offset.flat_map(|(event, range)| {
+        let mut result = vec![];
+
+        // Handle Start tags: order depends on tag type.
+        // For Table, anchor comes before Start (can't be first child of <table>).
+        // For other block tags, anchor comes after Start (first child of <p>, <li>, etc.).
+        if let Event::Start(tag) = &event {
+            let is_block_level = matches!(
+                tag,
+                Tag::Paragraph
+                    | Tag::Heading { .. }
+                    | Tag::BlockQuote(_)
+                    | Tag::CodeBlock(_)
+                    | Tag::Item
+                    | Tag::Table(_)
+                    | Tag::FootnoteDefinition(_)
+            );
+            if is_block_level {
+                let line = line_at_offset(&line_offsets, range.start);
+                let anchor = Event::Html(
+                    format!(r#"<span class="src" data-line="{}"></span>"#, line).into(),
+                );
+                if matches!(tag, Tag::Table(_)) {
+                    result.push(anchor);
+                    result.push(event.clone());
+                } else {
+                    result.push(event.clone());
+                    result.push(anchor);
+                }
+                return result;
+            }
+        }
+
+        // Our anchors are the only HTML allowed to carry data-line, so raw HTML
+        // from the file that mentions it is shown as text.
+        let event_to_push = match &event {
+            Event::Html(h) if hides_anchor(h) => Event::Text(h.clone()),
+            Event::InlineHtml(h) if hides_anchor(h) => Event::Text(h.clone()),
+            Event::InlineMath(tex) => Event::Html(render_math(tex, false).into()),
+            Event::DisplayMath(tex) => {
+                // Emit line anchor before the rendered math.
+                let line = line_at_offset(&line_offsets, range.start);
+                result.push(Event::Html(
+                    format!(r#"<span class="src" data-line="{}"></span>"#, line).into(),
+                ));
+                Event::Html(render_math(tex, true).into())
+            }
+            other => other.clone(),
+        };
+
+        result.push(event_to_push);
+        result
     });
+
     html::push_html(&mut rendered, events);
 
     let mut builder = ammonia::Builder::default();
@@ -716,6 +818,10 @@ fn render_markdown(source: &str) -> String {
     builder.add_allowed_classes("sup", ["footnote-definition-label", "footnote-reference"]);
     builder.add_tag_attributes("th", ["style"]);
     builder.add_tag_attributes("td", ["style"]);
+    // Source line anchors for mapping selections back to markdown.
+    builder.add_tags(["span"]);
+    builder.add_tag_attributes("span", ["data-line"]);
+    builder.add_allowed_classes("span", ["src"]);
     // Equations.
     builder.add_tags(MATHML_TAGS);
     for tag in MATHML_TAGS {
@@ -1125,6 +1231,122 @@ struct Launch {
     smoke: bool,
 }
 
+/// Format a note block for appending to a notes file.
+///
+/// Produces the markdown block:
+/// ```
+/// ## <reference>
+///
+/// > <quote line 1>
+/// > <quote line 2>
+/// > ...
+///
+/// <comment>
+///
+/// ```
+///
+/// If comment is empty, the comment paragraph is omitted.
+fn note_block(reference: &str, quote: &str, comment: &str) -> String {
+    let mut result = format!("## {}\n\n", reference);
+
+    for line in quote.lines() {
+        result.push_str(&format!("> {}\n", line));
+    }
+
+    let comment = comment.trim();
+    if !comment.is_empty() {
+        result.push('\n');
+        result.push_str(comment);
+    }
+
+    result.push_str("\n\n");
+    result
+}
+
+/// Append a note about a document selection to its notes sidecar.
+///
+/// The notes file is created at <document dir>/<stem>.notes.md. The document
+/// must be an existing regular file with a supported extension. Refuses if the
+/// document itself ends in `.notes.md` (no recursion).
+///
+/// Returns the notes path as a display string.
+#[tauri::command]
+fn append_note(
+    document: String,
+    reference: String,
+    quote: String,
+    comment: String,
+) -> Result<String, String> {
+    // Caps on quote and comment
+    if quote.len() > 20_000 {
+        return Err("quote is too long (max 20 000 chars)".into());
+    }
+    if comment.len() > 2_000 {
+        return Err("comment is too long (max 2 000 chars)".into());
+    }
+
+    let doc_path =
+        std::fs::canonicalize(PathBuf::from(document)).map_err(|error| error.to_string())?;
+
+    // Check that it exists and is a regular file
+    let metadata = std::fs::metadata(&doc_path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("document is not a regular file".into());
+    }
+
+    // Check extension is supported
+    if ![
+        "pdf", "png", "jpg", "jpeg", "webp", "avif", "gif", "bmp", "md", "markdown",
+    ]
+    .contains(&kind_for(&doc_path))
+    {
+        return Err("unsupported file type".into());
+    }
+
+    // Refuse if document itself is a notes file
+    if doc_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.ends_with(".notes.md"))
+        .unwrap_or(false)
+    {
+        return Err("cannot append notes about a notes file".into());
+    }
+
+    // Build notes path: same directory, <stem>.notes.md
+    let stem = doc_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "could not extract file stem".to_string())?;
+    let notes_name = format!("{}.notes.md", stem);
+    let notes_path = doc_path
+        .parent()
+        .unwrap_or_else(|| Path::new("/"))
+        .join(&notes_name);
+
+    // Format the note block
+    let block = note_block(&reference, &quote, &comment);
+
+    // Read existing content, if any
+    let existing = if notes_path.exists() {
+        std::fs::read_to_string(&notes_path).map_err(|error| error.to_string())?
+    } else {
+        String::new()
+    };
+
+    // Append: blank line before new block if file is non-empty
+    let new_content = if existing.is_empty() {
+        block
+    } else {
+        format!("{}\n{}", existing, block)
+    };
+
+    // Write back
+    std::fs::write(&notes_path, &new_content).map_err(|error| error.to_string())?;
+
+    Ok(display_path(&notes_path))
+}
+
 /// Open a link from a markdown file in the default browser.
 ///
 /// Web and mail only. A `file:` or an application's own scheme handed to the
@@ -1314,13 +1536,15 @@ usage: pdf-next [files...] [flags]
   pdf-next NOTES.md --sepia --poll 3       markdown as warm paper, checked every 3s
   pdf-next paper.pdf supp.pdf fig1.png     three tabs, the first one showing
   pdf-next paper.pdf --page 12             open at page 12
+  pdf-next notes.md --line 12              open at line 12 of the Markdown
   pdf-next paper.pdf --find \"Figure 3\"     open at the first match, highlighted
   pdf-next 'paper.pdf#page=7&search=wake'  the same, written as a link
 
 files   .pdf  .png .jpg .jpeg .webp .avif .gif .bmp  .md .markdown
         A file may carry a fragment saying where to land in it, in the form
         PDF links use: page=N, nameddest=NAME, search=TEXT, joined by &, with
-        spaces written %20. Quote it — a shell reads # as a comment.
+        spaces written %20. Markdown adds line=N, the counterpart of page=N.
+        Quote it — a shell reads # as a comment.
         If pdf-next is already running, the files open there as new tabs and
         this command returns at once. A file that is already a tab is aimed at
         that page rather than opened twice. Each file opened is printed on
@@ -1332,9 +1556,10 @@ flags
                                      page appearance for this window only
   --mode <night|sepia|invert|clear>  the same, by name
   --page <n>                         open at that page
+  --line <n>                         open at that source line (Markdown)
   --find <text>                      open at the first match, highlighted
   --dest <name>                      open at a named destination
-                                     These three speak about the file named
+                                     These four speak about the file named
                                      before them, or the first one when they
                                      come first.
   --no-focus                         hand the file over without raising the
@@ -1369,14 +1594,14 @@ struct Invocation {
     wait: bool,
     /// Set by `--no-focus`: open the file, leave the window where it is.
     no_focus: bool,
-    /// A `--page`/`--find`/`--dest` that arrived before any file, waiting for
-    /// the one it speaks about.
+    /// A `--page`/`--line`/`--find`/`--dest` that arrived before any file,
+    /// waiting for the one it speaks about.
     carry: Target,
 }
 
-/// Which target a `--page`, `--find` or `--dest` is about: the file named
-/// before it, or — when the flags come first — the one named next. Both orders
-/// are natural to type, so both mean the same thing.
+/// Which target a `--page`, `--line`, `--find` or `--dest` is about: the file
+/// named before it, or — when the flags come first — the one named next. Both
+/// orders are natural to type, so both mean the same thing.
 fn aimed_at(invocation: &mut Invocation) -> &mut Target {
     match invocation.files.last_mut() {
         Some((_, target)) => target,
@@ -1449,6 +1674,14 @@ where
             {
                 Some(page) => aimed_at(&mut invocation).page = Some(page),
                 None => return Err((2, "--page needs a page number, counting from 1".into())),
+            },
+            "--line" => match arguments
+                .next()
+                .and_then(|value| value.to_string_lossy().parse::<u32>().ok())
+                .filter(|line| *line >= 1)
+            {
+                Some(line) => aimed_at(&mut invocation).line = Some(line),
+                None => return Err((2, "--line needs a line number, counting from 1".into())),
             },
             "--find" | "--search" => match arguments.next() {
                 Some(value) if !value.is_empty() => {
@@ -1742,7 +1975,8 @@ fn main() {
             open_link,
             print_document,
             set_title,
-            smoke_report
+            smoke_report,
+            append_note
         ])
         .setup(move |app| {
             if let Some(seconds) = launch.poll {
@@ -1815,7 +2049,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{natural_key, open_download, open_link, parse_cli, render_markdown, Cli, Target};
+    use super::{
+        append_note, natural_key, note_block, open_download, open_link, parse_cli, render_markdown,
+        Cli, Target,
+    };
     use std::ffi::OsString;
 
     fn cli(words: &[&str]) -> Result<Cli, (i32, String)> {
@@ -1918,6 +2155,50 @@ mod tests {
         assert!(aim(&["a.pdf", "--no-focus"]).no_focus);
         assert_eq!(cli(&["--page", "0"]).err().map(|e| e.0), Some(2));
         assert_eq!(cli(&["--find"]).err().map(|e| e.0), Some(2));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_line_can_be_asked_for_by_flag_or_by_fragment() {
+        let dir = std::env::temp_dir().join(format!("pdf-next-line-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), b"# notes\n").unwrap();
+        std::fs::write(dir.join("other.md"), b"# other\n").unwrap();
+
+        let aim = |words: &[&str]| {
+            let parsed = parse_cli(words.iter().map(OsString::from), Some(&dir));
+            let Ok(Cli::Run(invocation)) = parsed else {
+                panic!("expected a run");
+            };
+            invocation
+        };
+
+        let before = aim(&["notes.md", "--line", "12", "other.md", "--find", "wake"]);
+        assert_eq!(before.files[0].1.line, Some(12));
+        assert_eq!(before.files[0].1.fragment(), "line=12");
+        assert_eq!(before.files[1].1.search.as_deref(), Some("wake"));
+        assert_eq!(before.files[0].1.search, None);
+        let after = aim(&["--line", "12", "notes.md"]);
+        assert_eq!(after.files[0].1.line, Some(12));
+        assert_eq!(after.files[0].1.fragment(), "line=12");
+
+        let linked = aim(&["--line", "3", "notes.md#line=12&search=wake"]);
+        let target = &linked.files[0].1;
+        assert_eq!(target.line, Some(12));
+        assert_eq!(target.search.as_deref(), Some("wake"));
+        assert_eq!(target.fragment(), "line=12&search=wake");
+        assert_eq!(linked.files[0].0, dir.join("notes.md"));
+
+        let refused = cli(&["--line", "0"]).err().unwrap();
+        assert_eq!(refused.0, 2);
+        assert!(
+            refused
+                .1
+                .contains("--line needs a line number, counting from 1"),
+            "{}",
+            refused.1
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2111,5 +2392,182 @@ mod tests {
         );
 
         std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn three_paragraphs_carry_line_numbers() {
+        let html = render_markdown("para1\n\npara2\n\npara3");
+        assert!(html.contains(r#"data-line="1""#), "{html}");
+        assert!(html.contains(r#"data-line="3""#), "{html}");
+        assert!(html.contains(r#"data-line="5""#), "{html}");
+        // Only three data-line attributes; no others.
+        let count = html.matches(r#"data-line=""#).count();
+        assert_eq!(count, 3, "expected 3 data-line attributes, found {count}");
+    }
+
+    #[test]
+    fn display_math_and_list_get_line_anchors() {
+        let html = render_markdown("text\n\n$$E = mc^2$$\n\n- item");
+        assert!(
+            html.contains(r#"data-line="3""#),
+            "DisplayMath on line 3: {html}"
+        );
+        assert!(
+            html.contains(r#"data-line="5""#),
+            "List item on line 5: {html}"
+        );
+    }
+
+    #[test]
+    fn crlf_line_endings_yield_same_line_numbers() {
+        let html_lf = render_markdown("para1\n\npara2\n\npara3");
+        let html_crlf = render_markdown("para1\r\n\r\npara2\r\n\r\npara3");
+        assert!(html_lf.contains(r#"data-line="1""#));
+        assert!(html_lf.contains(r#"data-line="3""#));
+        assert!(html_lf.contains(r#"data-line="5""#));
+        assert!(html_crlf.contains(r#"data-line="1""#));
+        assert!(html_crlf.contains(r#"data-line="3""#));
+        assert!(html_crlf.contains(r#"data-line="5""#));
+    }
+
+    #[test]
+    fn literal_data_line_in_source_is_escaped() {
+        let html = render_markdown(r#"para with <span class="src" data-line="99"></span> literal"#);
+        // The literal span should be escaped to text, so it won't contain a real data-line="99".
+        // The paragraph itself should have exactly one data-line="1".
+        let count = html.matches(r#"data-line="1""#).count();
+        assert_eq!(
+            count, 1,
+            "only the real paragraph anchor should have data-line: {html}"
+        );
+        // The literal HTML should be escaped; check for the escaped form.
+        assert!(
+            html.contains("&lt;span"),
+            "literal span should be escaped: {html}"
+        );
+    }
+
+    #[test]
+    fn formats_note_block_with_comment() {
+        let block = note_block("file.md:1-5", "line 1\nline 2", "This is a comment");
+        assert!(block.contains("## file.md:1-5"));
+        assert!(block.contains("> line 1"));
+        assert!(block.contains("> line 2"));
+        assert!(block.contains("This is a comment"));
+        assert!(block.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn formats_note_block_without_comment() {
+        let block = note_block("file.md:1-5", "line 1", "");
+        assert!(block.contains("## file.md:1-5"));
+        assert!(block.contains("> line 1"));
+        assert!(!block.contains("\nline 1")); // no uncommented line
+        assert!(block.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn appends_note_refuses_notes_file() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "pdf_next_notes_refuse_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let notes_path = temp_dir.join("test.notes.md");
+        std::fs::write(&notes_path, "# Notes\n").unwrap();
+
+        let result = append_note(
+            notes_path.display().to_string(),
+            "ref".to_string(),
+            "quote".to_string(),
+            "comment".to_string(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("notes file"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn appends_note_refuses_missing_file() {
+        let result = append_note(
+            "/tmp/nonexistent_file_xyz_12345.pdf".to_string(),
+            "ref".to_string(),
+            "quote".to_string(),
+            "comment".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn appends_note_refuses_quote_over_cap() {
+        let long_quote = "x".repeat(20_001);
+        let result = append_note(
+            "/tmp/test.md".to_string(),
+            "ref".to_string(),
+            long_quote,
+            "comment".to_string(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("quote"));
+    }
+
+    #[test]
+    fn appends_note_refuses_comment_over_cap() {
+        let long_comment = "x".repeat(2_001);
+        let result = append_note(
+            "/tmp/test.md".to_string(),
+            "ref".to_string(),
+            "quote".to_string(),
+            long_comment,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("comment"));
+    }
+
+    #[test]
+    fn appends_note_creates_and_appends() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "pdf_next_notes_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let doc_path = temp_dir.join("test_doc.md");
+        std::fs::write(&doc_path, "# Test").unwrap();
+
+        let result1 = append_note(
+            doc_path.display().to_string(),
+            "test.md:1".to_string(),
+            "first quote".to_string(),
+            "first comment".to_string(),
+        );
+        assert!(result1.is_ok());
+
+        let result2 = append_note(
+            doc_path.display().to_string(),
+            "test.md:5".to_string(),
+            "second quote".to_string(),
+            "second comment".to_string(),
+        );
+        assert!(result2.is_ok());
+
+        let notes_path = temp_dir.join("test_doc.notes.md");
+        let content = std::fs::read_to_string(&notes_path).unwrap();
+
+        // Both entries should be present
+        assert!(content.contains("## test.md:1"));
+        assert!(content.contains("## test.md:5"));
+        assert!(content.contains("first quote"));
+        assert!(content.contains("second quote"));
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

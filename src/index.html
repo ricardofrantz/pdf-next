@@ -87,6 +87,9 @@
         <path d="M2 5.5V3.5C2 2.95 2.45 2.5 3 2.5H5M11 2.5H13C13.55 2.5 14 2.95 14 3.5V5.5M14 10.5V12.5C14 13.05 13.55 13.5 13 13.5H11M5 13.5H3C2.45 13.5 2 13.05 2 12.5V10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         <rect x="5.6" y="5.6" width="4.8" height="4.8" rx="0.6" fill="currentColor"/>
       </symbol>
+      <symbol id="i-ask" viewBox="0 0 16 16" fill="none">
+        <path d="M3 14L4 10H2C1.45 10 1 9.55 1 9V3C1 2.45 1.45 2 2 2H12C12.55 2 13 2.45 13 3V9C13 9.55 12.55 10 12 10H6L3 14Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      </symbol>
     </svg>
 
     <header id="bar">
@@ -147,6 +150,15 @@
         </button>
         <button id="raw" type="button" class="md-only" title="Show the raw markdown (Ctrl+U)" aria-label="Show the raw markdown" aria-pressed="false">
           <svg class="icon"><use href="#i-raw"/></svg>
+        </button>
+        <button id="ask" type="button" class="not-image" title="Copy the selection with its source lines for an AI session (Ctrl+Shift+A)" aria-label="Copy selection for a session">
+          <svg class="icon"><use href="#i-ask"/></svg>
+        </button>
+        <button id="note" type="button" class="not-image" title="Add a note about the selection (Ctrl+Shift+N)" aria-label="Add a note about the selection">
+          <svg class="icon"><use href="#i-ask"/></svg>
+        </button>
+        <button id="notes" type="button" class="not-image" title="Open the notes file" aria-label="Open the notes file">
+          <svg class="icon"><use href="#i-ask"/></svg>
         </button>
         <button id="print" type="button" title="Print (Ctrl+P)" aria-label="Print">
           <svg class="icon"><use href="#i-print"/></svg>
@@ -220,6 +232,12 @@
         <button id="findClose" type="button" title="Close (Esc)" aria-label="Close find">
           <svg class="icon"><use href="#i-close"/></svg>
         </button>
+      </div>
+
+      <div id="note" hidden>
+        <div id="noteRef"></div>
+        <input id="noteText" type="text" placeholder="Comment (Enter to save, Esc to cancel)" />
+        <button id="noteSave" type="button">Save</button>
       </div>
 
       <div id="empty">
