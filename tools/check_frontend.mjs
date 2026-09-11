@@ -667,6 +667,16 @@ assert.match(
   /fn a_file_url_on_the_drag_pasteboard_is_a_dropped_file/,
   'The recovery must be run, not only compiled: a drop is the one path no CI can perform.',
 );
+assert.match(
+  main,
+  /registerForDraggedTypes[\s\S]*NSPasteboardTypeFileURL/,
+  'The webview must accept a file-URL drop; tao only registers the older filename type, so Finder otherwise never delivers the event.',
+);
+assert.match(
+  main,
+  /fn accept_file_url_drops/,
+  'Register the current type on the webview, not the window: tao unwraps the older property list and would panic.',
+);
 
 // The fixtures the smoke test opens, one per kind the viewer claims to show.
 for (const fixture of [

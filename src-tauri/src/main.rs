@@ -404,6 +404,32 @@ fn dropped_paths() -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// Let the webview accept a drop whose only name is a file URL.
+///
+/// tao registers the window for `NSFilenamesPboardType` only. A Finder drag
+/// that carries just `NSPasteboardTypeFileURL` is then refused before the
+/// pasteboard recovery can run: the cursor says "not allowed" and there is
+/// no Drop event. Registering the current type on the webview — not the
+/// window — is what lets wry take the drag. wry still hands over an empty
+/// path list; `dropped_paths` fills it in.
+///
+/// The window must not gain this type. tao's `draggingEntered` unwraps the
+/// older property list and would panic on a FileURL-only drop.
+#[cfg(target_os = "macos")]
+fn accept_file_url_drops(window: &tauri::WebviewWindow) {
+    let _ = window.with_webview(|webview| {
+        use objc2_app_kit::{NSPasteboardTypeFileURL, NSView};
+        use objc2_foundation::NSArray;
+
+        // SAFETY: Tauri's inner handle is the WKWebView, which is an NSView.
+        // setup runs on the main thread, which is where AppKit wants this.
+        unsafe {
+            let view = &*webview.inner().cast::<NSView>();
+            view.registerForDraggedTypes(&NSArray::from_slice(&[NSPasteboardTypeFileURL]));
+        }
+    });
+}
+
 fn deliver(app: &AppHandle, files: Vec<(PathBuf, Target)>, focus: bool) {
     let openings: Vec<Opening> = files
         .into_iter()
@@ -1727,6 +1753,8 @@ fn main() {
                 let _ = adopt(&app.state::<Watched>(), path);
             }
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "macos")]
+                accept_file_url_drops(&window);
                 let handle = app.handle().clone();
                 window.on_window_event(move |event| match event {
                     WindowEvent::ThemeChanged(theme) => {
