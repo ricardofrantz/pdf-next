@@ -12,6 +12,7 @@ const version = await readFile('src/vendor/PDFJS_VERSION', 'utf8');
 const readme = await readFile('README.md', 'utf8');
 const page = await readFile('src/index.html', 'utf8');
 const smoke = await readFile('src/smoke.mjs', 'utf8');
+const nsisTemplate = await readFile('src-tauri/windows/installer.nsi', 'utf8');
 
 // PDF.js must parse in a real worker thread.
 assert.match(
@@ -400,6 +401,31 @@ assert.match(
   readme,
   /## From scripts and agents/,
   'The README must tell a program how to call this.',
+);
+
+// 0.9.2's NSIS setup said "Unable to uninstall!" over 0.9.0: it looked up
+// Software\<publisher>\pdf-next, 0.9.0 had written `frantz`, and `_?=` was
+// empty. The bundled template must keep the fallback, and the config must
+// point at it.
+assert.equal(
+  config.bundle.windows?.nsis?.template,
+  'windows/installer.nsi',
+  'The Windows NSIS bundle must use the patched installer template.',
+);
+assert.match(
+  nsisTemplate,
+  /Function ResolvePreviousInstallDir/,
+  'The NSIS template must resolve the old install dir before calling uninstall.exe.',
+);
+assert.match(
+  nsisTemplate,
+  /Software\\frantz\\\$\{PRODUCTNAME\}/,
+  'The fallback must still find a 0.9.0 install under Software\\frantz.',
+);
+assert.match(
+  nsisTemplate,
+  /\$4 == ""[\s\S]*Goto reinst_done/,
+  'An empty install dir must overwrite, not run uninstall.exe with `_?=`.',
 );
 
 // Updates: the webview may talk to exactly one host, only when asked, and may
