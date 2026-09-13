@@ -1455,7 +1455,8 @@ fn load_store(doc_path: &Path) -> Result<(PathBuf, ReviewFile), String> {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("");
-        let old = parse_store(&std::fs::read_to_string(&legacy).map_err(|error| error.to_string())?)?;
+        let old =
+            parse_store(&std::fs::read_to_string(&legacy).map_err(|error| error.to_string())?)?;
         let have: HashSet<String> = store.reviews.iter().map(review_fingerprint).collect();
         for review in old.reviews {
             if review.file == basename && !have.contains(&review_fingerprint(&review)) {
@@ -2778,8 +2779,12 @@ mod tests {
         let doc = dir.join("collab.md");
         std::fs::write(&doc, "# hi\n").unwrap();
 
-        let err = write_review(&doc.display().to_string(), markdown_review(), &HashSet::new())
-            .unwrap_err();
+        let err = write_review(
+            &doc.display().to_string(),
+            markdown_review(),
+            &HashSet::new(),
+        )
+        .unwrap_err();
         assert!(err.contains("never opened"), "{err}");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2794,12 +2799,8 @@ mod tests {
         let mut allowed = HashSet::new();
         allowed.insert(canonical);
 
-        let err = write_review(
-            &sidecar.display().to_string(),
-            markdown_review(),
-            &allowed,
-        )
-        .unwrap_err();
+        let err =
+            write_review(&sidecar.display().to_string(), markdown_review(), &allowed).unwrap_err();
         assert!(err.contains("review file"), "{err}");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2852,14 +2853,12 @@ mod tests {
         assert!(dir.join("paper_review.json").exists());
         assert!(!dir.join("_review.json").exists());
 
-        let md_store: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("collab_review.json")).unwrap(),
-        )
-        .unwrap();
-        let pdf_store: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("paper_review.json")).unwrap(),
-        )
-        .unwrap();
+        let md_store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("collab_review.json")).unwrap())
+                .unwrap();
+        let pdf_store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("paper_review.json")).unwrap())
+                .unwrap();
         assert_eq!(md_store["format"], 2);
         assert_eq!(pdf_store["format"], 2);
         let md_keys: HashSet<_> = md_store["reviews"][0]
@@ -2945,8 +2944,16 @@ mod tests {
 
         let updated = change_review_comment(&path, "r1", "edited", &allowed).unwrap();
         assert_eq!(updated.reviews.len(), 2);
-        let first = updated.reviews.iter().find(|review| review.id == "r1").unwrap();
-        let other = updated.reviews.iter().find(|review| review.id == "r2").unwrap();
+        let first = updated
+            .reviews
+            .iter()
+            .find(|review| review.id == "r1")
+            .unwrap();
+        let other = updated
+            .reviews
+            .iter()
+            .find(|review| review.id == "r2")
+            .unwrap();
         assert_eq!(first.comment, "edited");
         assert_eq!(other.comment, "second");
 
