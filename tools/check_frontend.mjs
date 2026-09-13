@@ -3,6 +3,7 @@
 // one-second poll, and the mid-build gap behaviour.
 import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
+import { reviewLabel } from '../src/review-label.mjs';
 
 const app = await readFile('src/app.mjs', 'utf8');
 const main = await readFile('src-tauri/src/main.rs', 'utf8');
@@ -746,6 +747,63 @@ assert.match(
   'A new review must append a record, not a markdown block.',
 );
 assert.match(page, /id="reviewPane"/, 'The Review panel lives on the right of the stage.');
+assert.match(page, /id="reviewChip"/, 'A chip after a short hold adds a review.');
+assert.match(page, /id="reviewMenu"/, 'Right-click on a selection adds a review.');
+assert.match(
+  app,
+  /const REVIEW_CHIP_MS = 500/,
+  'The add-review chip waits half a second after the selection settles.',
+);
+assert.match(
+  app,
+  /function reviewTint\(id\)[\s\S]*?REVIEW_TINTS/,
+  'Review marks cycle a fixed set of tints from the record id.',
+);
+assert.match(
+  app,
+  /function tintQuote\([\s\S]*?applyReviewTint\(el, id\)/,
+  'Review marks wash the existing nodes; they must not wrap them.',
+);
+assert.doesNotMatch(
+  app,
+  /function tintQuote\([\s\S]*?createElement\('mark'\)/,
+  'Wrapping PDF.js text in <mark> swaps the font and makes the line unreadable.',
+);
+assert.match(
+  styles,
+  /\[data-review-tint='1'\][\s\S]*?\[data-review-tint='6'\]/,
+  'Six review tints, cycled onto the mark and the panel row.',
+);
+assert.match(
+  app,
+  /from '\.\/review-label\.mjs'/,
+  'Review numbers come from the shared label helper.',
+);
+assert.match(styles, /\.review-no/, 'Each highlighted block carries its 1.1 number.');
+{
+  const pages = [
+    { id: 'r1', at: { page: 1 } },
+    { id: 'r2', at: { page: 1 } },
+    { id: 'r3', at: { page: 1 } },
+    { id: 'r4', at: { page: 2 } },
+    { id: 'r5', at: { page: 2 } },
+  ];
+  assert.equal(reviewLabel(pages[0], pages), '1.1');
+  assert.equal(reviewLabel(pages[1], pages), '1.2');
+  assert.equal(reviewLabel(pages[2], pages), '1.3');
+  assert.equal(reviewLabel(pages[3], pages), '2.1');
+  assert.equal(reviewLabel(pages[4], pages), '2.2');
+  const afterDelete = pages.filter((review) => review.id !== 'r2');
+  assert.equal(reviewLabel(afterDelete[1], afterDelete), '1.2');
+  const md = [
+    { id: 'r1', at: { line: 12 } },
+    { id: 'r2', at: { line: 12 } },
+    { id: 'r3', at: { line: 40 } },
+  ];
+  assert.equal(reviewLabel(md[0], md), '1.1');
+  assert.equal(reviewLabel(md[1], md), '1.2');
+  assert.equal(reviewLabel(md[2], md), '2.1');
+}
 assert.match(
   app,
   /const REVIEW_PANE_WIDTH = 280/,

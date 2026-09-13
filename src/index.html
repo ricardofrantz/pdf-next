@@ -93,6 +93,9 @@
       <symbol id="i-review" viewBox="0 0 16 16" fill="none">
         <path d="M3 3.5H13M3 8H13M3 12.5H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
       </symbol>
+      <symbol id="i-add-review" viewBox="0 0 16 16" fill="none">
+        <path d="M8 3.5V12.5M3.5 8H12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </symbol>
     </svg>
 
     <header id="bar">
@@ -246,6 +249,13 @@
         <div id="noteRef"></div>
         <input id="noteText" type="text" placeholder="Comment (Enter to save, Esc to cancel)" />
         <button id="noteSave" type="button">Save</button>
+      </div>
+
+      <button id="reviewChip" type="button" hidden title="Add a review" aria-label="Add a review">
+        <svg class="icon"><use href="#i-add-review"/></svg>
+      </button>
+      <div id="reviewMenu" hidden role="menu">
+        <button id="reviewMenuAdd" type="button" role="menuitem">Add review</button>
       </div>
 
       <div id="empty">

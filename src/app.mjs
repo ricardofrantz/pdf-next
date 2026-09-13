@@ -1,6 +1,7 @@
 // pdf-next viewer. One file, one window, one job: show the document and keep
 // showing the newest version of it.
 import { bootIsFine, failures, mark } from './smoke.mjs';
+import { reviewIdNum, reviewLabel } from './review-label.mjs';
 import * as pdfjsLib from './vendor/pdfjs/build/pdf.min.mjs';
 
 // pdf_viewer.mjs resolves the core library through this global. Never assign
@@ -95,6 +96,9 @@ const ui = {
   noteSave: el('noteSave'),
   reviewPane: el('reviewPane'),
   reviewList: el('reviewList'),
+  reviewChip: el('reviewChip'),
+  reviewMenu: el('reviewMenu'),
+  reviewMenuAdd: el('reviewMenuAdd'),
 };
 
 const state = {
@@ -644,6 +648,8 @@ function highlightChangedBlocks(indices, blocks) {
 // into, before the reader resizes it and the per-file memory takes over.
 const MARKDOWN_WINDOW_WIDTH = 780;
 const REVIEW_PANE_WIDTH = 280;
+const REVIEW_TINTS = 6;
+const REVIEW_CHIP_MS = 500;
 
 /// Rendered or raw. Both nodes stay in the DOM with the same content, so the
 /// toggle is a visibility flip — no re-render, no IPC round trip.
@@ -1504,6 +1510,7 @@ async function closeAll() {
   updateSiblingControls();
   renderTabs();
   closeFind();
+  hideReviewChrome();
   ui.noteBox.hidden = true;
   ui.noteText.value = '';
   state.reviewGrown = false;
@@ -2077,6 +2084,7 @@ function hasLocator(record) {
 }
 
 function openNoteBox() {
+  hideReviewChrome();
   const picked = describeSelection();
   if (!picked) {
     setStatus('Select some text first');
@@ -2187,13 +2195,14 @@ function renderReviewList() {
     const row = document.createElement('article');
     row.className = 'review-row';
     row.dataset.reviewId = review.id;
+    row.dataset.reviewTint = String(reviewTint(review.id));
     if (review.id === state.selectedReviewId) {
       row.classList.add('on');
     }
 
     const loc = document.createElement('div');
     loc.className = 'review-loc';
-    loc.textContent = formatSelection(review);
+    loc.append(makeReviewBadge(review), document.createTextNode(formatSelection(review)));
     row.append(loc);
 
     const quote = document.createElement('blockquote');
@@ -2318,40 +2327,139 @@ async function jumpToReview(review) {
   }
 }
 
+/// `r1` → 1, `r7` → 1 again. Stable for a given id, even after a delete.
+function reviewTint(id) {
+  const n = reviewIdNum(id);
+  if (n < 1) {
+    return 1;
+  }
+  return ((n - 1) % REVIEW_TINTS) + 1;
+}
+
+function makeReviewBadge(review) {
+  const badge = document.createElement('span');
+  badge.className = 'review-no';
+  badge.textContent = reviewLabel(review, state.reviews);
+  badge.dataset.reviewId = review.id;
+  badge.dataset.reviewTint = String(reviewTint(review.id));
+  return badge;
+}
+
+function clearReviewBadges(root) {
+  if (!root) {
+    return;
+  }
+  for (const node of root.querySelectorAll('.review-no, .review-nos')) {
+    node.remove();
+  }
+}
+
+function placeMarkdownBadge(host, review) {
+  let pack = host.querySelector(':scope > .review-nos');
+  if (!pack) {
+    pack = document.createElement('span');
+    pack.className = 'review-nos';
+    host.append(pack);
+  }
+  pack.append(makeReviewBadge(review));
+}
+
+function placePdfBadge(page, anchor, review) {
+  if (!page) {
+    return;
+  }
+  const badge = makeReviewBadge(review);
+  if (anchor) {
+    const pageRect = page.getBoundingClientRect();
+    const rect = anchor.getBoundingClientRect();
+    const top = Math.max(0, rect.top - pageRect.top - 12);
+    const near = [...page.querySelectorAll(':scope > .review-no')].filter((node) => {
+      const other = Number.parseFloat(node.style.top);
+      return Number.isFinite(other) && Math.abs(other - top) < 10;
+    }).length;
+    badge.style.left = `${rect.right - pageRect.left + near * 26}px`;
+    badge.style.top = `${top}px`;
+  } else {
+    badge.style.right = '8px';
+    badge.style.top = '8px';
+  }
+  page.append(badge);
+}
+
+function applyReviewTint(el, id) {
+  if (!el) {
+    return;
+  }
+  if (el.classList.contains('page')) {
+    el.classList.add('review-page');
+  } else if (el.closest('.textLayer')) {
+    el.classList.add('review');
+  } else {
+    el.classList.add('review-block');
+  }
+  el.dataset.reviewId = id;
+  el.dataset.reviewTint = String(reviewTint(id));
+}
+
+function clearReviewTint(el) {
+  if (!el) {
+    return;
+  }
+  el.classList.remove('review-block', 'review', 'review-page');
+  delete el.dataset.reviewId;
+  delete el.dataset.reviewTint;
+}
+
 function unwrapReviewMarks(root) {
   if (!root) {
     return;
   }
+  clearReviewBadges(root);
   for (const mark of [...root.querySelectorAll('mark.review')]) {
-    mark.replaceWith(document.createTextNode(mark.textContent));
+    const parent = mark.parentNode;
+    while (mark.firstChild) {
+      parent.insertBefore(mark.firstChild, mark);
+    }
+    mark.remove();
   }
-  for (const block of root.querySelectorAll('.review-block')) {
-    block.classList.remove('review-block');
-    delete block.dataset.reviewId;
+  for (const el of [...root.querySelectorAll('.review-block, span.review, [data-review-tint]')]) {
+    if (el.classList.contains('review-no') || el.classList.contains('review-nos')) {
+      el.remove();
+      continue;
+    }
+    clearReviewTint(el);
   }
 }
 
-function highlightQuote(root, quote, id) {
+/// Wash the existing nodes. Wrapping PDF.js spans in `<mark>` swaps the font.
+function tintQuote(root, quote, id) {
   const needle = quote.replace(/\s+/g, ' ').trim();
   if (!root || needle.length < 2) {
-    return false;
+    return null;
   }
   const snippet = needle.slice(0, 48).toLowerCase();
+  const short = snippet.slice(0, Math.min(24, snippet.length));
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let node;
   while ((node = walker.nextNode())) {
     const norm = node.textContent.replace(/\s+/g, ' ').toLowerCase();
-    if (!norm.includes(snippet.slice(0, Math.min(24, snippet.length)))) {
+    if (!norm.includes(short)) {
       continue;
     }
-    const mark = document.createElement('mark');
-    mark.className = 'review';
-    mark.dataset.reviewId = id;
-    node.parentNode.insertBefore(mark, node);
-    mark.appendChild(node);
-    return true;
+    let el = node.parentElement;
+    const first = el;
+    let covered = '';
+    while (el && root.contains(el)) {
+      applyReviewTint(el, id);
+      covered += ` ${el.textContent.replace(/\s+/g, ' ')}`;
+      if (covered.toLowerCase().includes(snippet) || covered.length >= needle.length) {
+        return first;
+      }
+      el = el.nextElementSibling;
+    }
+    return first;
   }
-  return false;
+  return null;
 }
 
 function paintMarkdownMarks() {
@@ -2362,7 +2470,7 @@ function paintMarkdownMarks() {
       continue;
     }
     const end = review.at.end || start;
-    const hosts = [];
+    let badgeHost = null;
     for (const anchor of ui.markdown.querySelectorAll('[data-line]')) {
       const line = Number(anchor.dataset.line);
       if (line < start || line > end) {
@@ -2372,21 +2480,21 @@ function paintMarkdownMarks() {
         anchor.parentElement && anchor.parentElement !== ui.markdown
           ? anchor.parentElement
           : anchor;
-      host.classList.add('review-block');
-      host.dataset.reviewId = review.id;
-      hosts.push(host);
-    }
-    for (const host of hosts) {
-      if (highlightQuote(host, review.quote, review.id)) {
-        break;
+      applyReviewTint(host, review.id);
+      if (!badgeHost) {
+        badgeHost = host;
       }
+    }
+    if (badgeHost) {
+      placeMarkdownBadge(badgeHost, review);
     }
   }
 }
 
 function paintPdfMarks() {
   for (const page of ui.viewer.querySelectorAll('.page')) {
-    page.classList.remove('review-page');
+    clearReviewBadges(page);
+    clearReviewTint(page);
     unwrapReviewMarks(page.querySelector('.textLayer'));
   }
   for (const review of state.reviews) {
@@ -2395,14 +2503,21 @@ function paintPdfMarks() {
       continue;
     }
     const end = review.at.end || start;
+    let placed = false;
     for (let pageNum = start; pageNum <= end; pageNum += 1) {
       const page = ui.viewer.querySelector(`.page[data-page-number="${pageNum}"]`);
       const layer = page?.querySelector('.textLayer');
       if (!layer) {
         continue;
       }
-      if (!highlightQuote(layer, review.quote, review.id)) {
-        page.classList.add('review-page');
+      const first = tintQuote(layer, review.quote, review.id);
+      if (first && !placed) {
+        placePdfBadge(page, first, review);
+        placed = true;
+      } else if (!first && !placed) {
+        applyReviewTint(page, review.id);
+        placePdfBadge(page, null, review);
+        placed = true;
       }
     }
   }
@@ -2426,6 +2541,108 @@ function reviewFromEvent(event) {
   }
   return host.dataset.reviewId || null;
 }
+
+let reviewChipTimer = 0;
+
+function hideReviewMenu() {
+  ui.reviewMenu.hidden = true;
+}
+
+function hideReviewChip() {
+  window.clearTimeout(reviewChipTimer);
+  reviewChipTimer = 0;
+  ui.reviewChip.hidden = true;
+}
+
+function hideReviewChrome() {
+  hideReviewChip();
+  hideReviewMenu();
+}
+
+function placeFloating(node, x, y) {
+  const pad = 8;
+  const width = node.offsetWidth || 28;
+  const height = node.offsetHeight || 28;
+  node.style.left = `${Math.max(pad, Math.min(x, window.innerWidth - width - pad))}px`;
+  node.style.top = `${Math.max(pad, Math.min(y, window.innerHeight - height - pad))}px`;
+}
+
+function selectionInDocument() {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) {
+    return null;
+  }
+  const range = selection.getRangeAt(0);
+  const node = range.commonAncestorContainer;
+  const el = node.nodeType === 3 ? node.parentElement : node;
+  if (!(el instanceof Element)) {
+    return null;
+  }
+  if (el.closest('#reviewPane, #noteBox, #reviewChip, #reviewMenu, #bar, #find, #tabs')) {
+    return null;
+  }
+  if (!el.closest('#markdown, #markdownRaw, #viewer, #viewerContainer, #markdownStage')) {
+    return null;
+  }
+  return range;
+}
+
+function reviewFromSelection() {
+  const picked = describeSelection();
+  if (!picked || !hasLocator(picked) || !selectionInDocument()) {
+    return null;
+  }
+  return picked;
+}
+
+function showReviewChip() {
+  const range = selectionInDocument();
+  if (!range || !reviewFromSelection() || !ui.noteBox.hidden || !ui.reviewMenu.hidden) {
+    return;
+  }
+  const rect = range.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) {
+    return;
+  }
+  ui.reviewChip.hidden = false;
+  placeFloating(ui.reviewChip, rect.right + 4, rect.top - 34);
+}
+
+function scheduleReviewChip() {
+  window.clearTimeout(reviewChipTimer);
+  reviewChipTimer = 0;
+  ui.reviewChip.hidden = true;
+  if (!ui.noteBox.hidden) {
+    hideReviewMenu();
+    return;
+  }
+  if (state.file?.kind !== 'markdown' && state.file?.kind !== 'pdf') {
+    hideReviewMenu();
+    return;
+  }
+  if (!reviewFromSelection()) {
+    hideReviewMenu();
+    return;
+  }
+  if (!ui.reviewMenu.hidden) {
+    return;
+  }
+  reviewChipTimer = window.setTimeout(showReviewChip, REVIEW_CHIP_MS);
+}
+
+function onDocumentContextMenu(event) {
+  if (state.file?.kind !== 'markdown' && state.file?.kind !== 'pdf') {
+    return;
+  }
+  if (!reviewFromSelection()) {
+    return;
+  }
+  event.preventDefault();
+  hideReviewChip();
+  ui.reviewMenu.hidden = false;
+  placeFloating(ui.reviewMenu, event.clientX, event.clientY);
+}
+
 // ── Wiring ────────────────────────────────────────────────────────────────
 
 ui.open.addEventListener('click', async () => {
@@ -2588,6 +2805,26 @@ ui.raw.addEventListener('click', () => setRaw(!state.markdownRaw));
 ui.ask.addEventListener('click', () => void askSelection());
 ui.note.addEventListener('click', () => void openNoteBox());
 ui.notes.addEventListener('click', () => toggleReviewPanel());
+ui.reviewChip.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+});
+ui.reviewChip.addEventListener('click', () => openNoteBox());
+ui.reviewMenuAdd.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+});
+ui.reviewMenuAdd.addEventListener('click', () => openNoteBox());
+document.addEventListener('selectionchange', scheduleReviewChip);
+ui.container.addEventListener('contextmenu', onDocumentContextMenu);
+ui.markdownStage.addEventListener('contextmenu', onDocumentContextMenu);
+ui.container.addEventListener('scroll', hideReviewChrome, { passive: true });
+ui.markdownStage.addEventListener('scroll', hideReviewChrome, { passive: true });
+document.addEventListener('pointerdown', (event) => {
+  const target = event.target;
+  if (target instanceof Element && target.closest('#reviewChip, #reviewMenu')) {
+    return;
+  }
+  hideReviewMenu();
+});
 
 // A link in a markdown file must not leave the page. A relative one —
 // `[notes](other.md)` — resolves against the app origin, which the navigation
@@ -2692,6 +2929,7 @@ ui.poll.addEventListener('change', () => {
 // A size the app chose for itself while wrapping is not a size the reader chose.
 let sizeTimer = 0;
 window.addEventListener('resize', () => {
+  hideReviewChrome();
   if (!state.file || wrapping) {
     return;
   }
@@ -2747,6 +2985,7 @@ ui.noteText.addEventListener('keydown', (event) => {
     void saveNote();
   } else if (event.key === 'Escape') {
     event.preventDefault();
+    hideReviewChrome();
     ui.noteBox.hidden = true;
     ui.noteText.value = '';
   }
@@ -2878,9 +3117,15 @@ window.addEventListener('keydown', (event) => {
   if (typing) {
     return;
   }
-  if (key === 'escape' && !ui.find.hidden) {
-    closeFind();
-    return;
+  if (key === 'escape') {
+    if (!ui.reviewMenu.hidden || !ui.reviewChip.hidden) {
+      hideReviewChrome();
+      return;
+    }
+    if (!ui.find.hidden) {
+      closeFind();
+      return;
+    }
   }
   // Zoom is the one thing that means the same in both modes.
   if (key === '+' || key === '=') {

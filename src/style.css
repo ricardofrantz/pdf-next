@@ -23,8 +23,20 @@
   --page-ring: 30%;
   --aim-highlight: rgba(255, 213, 0, 0.55);
   --changed-highlight: rgba(100, 200, 255, 0.4);
-  --review-mark: rgba(220, 40, 30, 0.28);
-  --review-mark-line: #c4241a;
+  --review-1: rgba(220, 40, 30, 0.28);
+  --review-1-line: #c4241a;
+  --review-2: rgba(30, 90, 220, 0.26);
+  --review-2-line: #1a4fc4;
+  --review-3: rgba(210, 150, 10, 0.32);
+  --review-3-line: #9a6f00;
+  --review-4: rgba(20, 140, 70, 0.26);
+  --review-4-line: #1a7f4b;
+  --review-5: rgba(140, 50, 190, 0.26);
+  --review-5-line: #7a28b8;
+  --review-6: rgba(10, 140, 140, 0.26);
+  --review-6-line: #0d7a7a;
+  --review-fill: var(--review-1);
+  --review-line: var(--review-1-line);
 
   --bar-height: 36px;
   --control-height: 26px;
@@ -55,8 +67,18 @@
   --page-ring: 26%;
   --aim-highlight: rgba(255, 179, 0, 0.5);
   --changed-highlight: rgba(100, 150, 255, 0.35);
-  --review-mark: rgba(255, 90, 80, 0.38);
-  --review-mark-line: #f0877a;
+  --review-1: rgba(255, 90, 80, 0.38);
+  --review-1-line: #f0877a;
+  --review-2: rgba(90, 150, 255, 0.36);
+  --review-2-line: #6fb3f2;
+  --review-3: rgba(255, 200, 80, 0.36);
+  --review-3-line: #e0b040;
+  --review-4: rgba(80, 210, 130, 0.36);
+  --review-4-line: #6fce9d;
+  --review-5: rgba(200, 130, 255, 0.36);
+  --review-5-line: #c090f0;
+  --review-6: rgba(80, 210, 200, 0.36);
+  --review-6-line: #5ecfc4;
 }
 
 :root[data-theme='light'] {
@@ -85,8 +107,18 @@
     --page-ring: 26%;
     --aim-highlight: rgba(255, 179, 0, 0.5);
     --changed-highlight: rgba(100, 150, 255, 0.35);
-    --review-mark: rgba(255, 90, 80, 0.38);
-    --review-mark-line: #f0877a;
+    --review-1: rgba(255, 90, 80, 0.38);
+    --review-1-line: #f0877a;
+    --review-2: rgba(90, 150, 255, 0.36);
+    --review-2-line: #6fb3f2;
+    --review-3: rgba(255, 200, 80, 0.36);
+    --review-3-line: #e0b040;
+    --review-4: rgba(80, 210, 130, 0.36);
+    --review-4-line: #6fce9d;
+    --review-5: rgba(200, 130, 255, 0.36);
+    --review-5-line: #c090f0;
+    --review-6: rgba(80, 210, 200, 0.36);
+    --review-6-line: #5ecfc4;
   }
 }
 
@@ -456,15 +488,19 @@ body.review-open #markdownStage {
   margin-bottom: 8px;
   padding: 8px;
   border: 1px solid var(--widget-border);
+  border-left: 3px solid var(--review-line);
   border-radius: 6px;
-  background: var(--widget);
+  background: var(--review-fill);
 }
 
 .review-row.on {
-  border-color: var(--review-mark-line);
+  border-color: var(--review-line);
 }
 
 .review-loc {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 11px;
   color: var(--fg-dim);
 }
@@ -502,16 +538,115 @@ body.review-open #markdownStage {
   font-size: 11px;
 }
 
-mark.review,
-.review-block {
-  background: var(--review-mark);
+[data-review-tint='1'] {
+  --review-fill: var(--review-1);
+  --review-line: var(--review-1-line);
+}
+[data-review-tint='2'] {
+  --review-fill: var(--review-2);
+  --review-line: var(--review-2-line);
+}
+[data-review-tint='3'] {
+  --review-fill: var(--review-3);
+  --review-line: var(--review-3-line);
+}
+[data-review-tint='4'] {
+  --review-fill: var(--review-4);
+  --review-line: var(--review-4-line);
+}
+[data-review-tint='5'] {
+  --review-fill: var(--review-5);
+  --review-line: var(--review-5-line);
+}
+[data-review-tint='6'] {
+  --review-fill: var(--review-6);
+  --review-line: var(--review-6-line);
+}
+
+/* Wash only. Never change the typeface — wrapping PDF.js spans in <mark>
+   used to swap the font and make the line unreadable. */
+.review-block,
+.textLayer span.review {
+  background-color: var(--review-fill);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
 
+.review-block {
+  position: relative;
+}
+
+.review-nos {
+  position: absolute;
+  top: 0;
+  right: 4px;
+  z-index: 2;
+  display: flex;
+  gap: 3px;
+  transform: translateY(-40%);
+  pointer-events: none;
+}
+
+.review-no {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: var(--review-line);
+  color: #fff;
+  font: 600 10px/1 var(--ui-font);
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 1px rgb(0 0 0 / 0.35);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.page > .review-no {
+  position: absolute;
+  z-index: 2;
+}
+
 .page.review-page {
-  outline: 2px solid var(--review-mark-line);
+  outline: 2px solid var(--review-line);
   outline-offset: 2px;
+}
+
+#reviewChip,
+#reviewMenu {
+  position: fixed;
+  z-index: 6;
+}
+
+#reviewChip {
+  display: flex;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0;
+  border: 1px solid var(--widget-border);
+  border-radius: 50%;
+  background: var(--widget);
+  box-shadow: 0 2px 10px var(--shadow);
+}
+
+#reviewChip[hidden],
+#reviewMenu[hidden] {
+  display: none;
+}
+
+#reviewMenu {
+  min-width: 140px;
+  padding: 4px;
+  border: 1px solid var(--widget-border);
+  border-radius: 6px;
+  background: var(--widget);
+  box-shadow: 0 4px 16px var(--shadow);
+}
+
+#reviewMenu button {
+  width: 100%;
+  justify-content: flex-start;
+  padding: 0 10px;
 }
 
 #viewerContainer {
@@ -601,6 +736,7 @@ body.mode-invert #image {
 }
 
 .pdfViewer .page {
+  position: relative;
   box-shadow:
     0 0 0 1px color-mix(in srgb, var(--fg) var(--page-ring), transparent),
     0 2px 12px var(--shadow);
@@ -889,6 +1025,13 @@ body.mode-sepia #markdownStage {
   text-align: left;
 }
 
+#markdown ::selection,
+#markdown *::selection {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+  color: inherit;
+  -webkit-text-fill-color: inherit;
+}
+
 #markdown > :first-child {
   margin-top: 0;
 }
@@ -1031,7 +1174,9 @@ body.mode-sepia #markdownStage {
   }
 
   #reviewPane,
-  #noteBox {
+  #noteBox,
+  #reviewChip,
+  #reviewMenu {
     display: none !important;
   }
 

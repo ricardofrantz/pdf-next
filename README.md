@@ -68,7 +68,7 @@ that survives a build deleting and recreating the file mid-compile.
   in Latin Modern — no JavaScript math engine, nothing fetched, and the MathML meets the same
   sanitizer as the prose.
 - **Markdown typography:** Rendered text is set in Latin Modern Roman at 17 px on a 38 em measure, hyphenated with `text-wrap: pretty` for natural word breaks. Zoom reflows the text rather than scaling it.
-- **Ask and the Review panel.** Select text in Markdown or a PDF — the locator is the only difference (`at.line` vs `at.page`). `Ctrl+Shift+A` copies that record as a Markdown quote headed by `collab.md:12-18` or `paper.pdf p.7`. `Ctrl+Shift+N` adds a comment; the passage stays marked in red, and the Review panel on the right lists it so you can jump back, edit the comment, or delete it (`Ctrl+Shift+R` toggles the panel). Each file owns `{stem}_review.json` (`paper.pdf` → `paper_review.json`). The app writes only that sidecar, only for a document you have open. Capped at 20,000 characters of quote; not available for images.
+- **Ask and the Review panel.** Select text in Markdown or a PDF — the locator is the only difference (`at.line` vs `at.page`). `Ctrl+Shift+A` copies that record as a Markdown quote headed by `collab.md:12-18` or `paper.pdf p.7`. `Ctrl+Shift+N`, a right-click, or the chip that appears after a short hold adds a comment. Each review is numbered `page.n` (`1.1`, `1.2`, `2.1`…; Markdown uses the same shape, counting distinct locations in reading order). The number sits on the highlighted block and on the Review row. Marks cycle six colours (red, then blue, …) and the row uses the same tint. `Ctrl+Shift+R` toggles the panel so you can jump back, edit the comment, or delete it. Each file owns `{stem}_review.json` (`paper.pdf` → `paper_review.json`). The app writes only that sidecar, only for a document you have open. Capped at 20,000 characters of quote; not available for images.
 - **Changed blocks light up on reload:** When a Markdown file rewrites, changed and new paragraphs, headings, list items, tables and equations fade from a highlight over a few seconds. The comparison is by content: adding a paragraph marks only that one. Scroll position is kept.
 - **Links go where you would expect.** A `#heading` or footnote scrolls; a web link opens in
   your browser; a relative link — `[notes](other.md)`, `[fig](fig1.png)`, the paper it
@@ -95,7 +95,7 @@ that survives a build deleting and recreating the file mid-compile.
   sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
   same size follows the first one, as it does in every other viewer. If the machine has nothing
   to print to — no printer, or a stopped print service — it says so rather than opening nothing.
-- **The title says which build you are running** — `paper.pdf — pdf-next 0.11.0` — so a bug report
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.12.0` — so a bug report
   can name a version without hunting for an about box.
 - **Tells you when there is a newer version.** A few seconds after launch the app asks
   GitHub for the latest release, once; if it is newer, the last toolbar button lights up and a
