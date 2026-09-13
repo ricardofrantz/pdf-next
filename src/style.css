@@ -23,6 +23,8 @@
   --page-ring: 30%;
   --aim-highlight: rgba(255, 213, 0, 0.55);
   --changed-highlight: rgba(100, 200, 255, 0.4);
+  --review-mark: rgba(220, 40, 30, 0.28);
+  --review-mark-line: #c4241a;
 
   --bar-height: 36px;
   --control-height: 26px;
@@ -53,6 +55,8 @@
   --page-ring: 26%;
   --aim-highlight: rgba(255, 179, 0, 0.5);
   --changed-highlight: rgba(100, 150, 255, 0.35);
+  --review-mark: rgba(255, 90, 80, 0.38);
+  --review-mark-line: #f0877a;
 }
 
 :root[data-theme='light'] {
@@ -81,6 +85,8 @@
     --page-ring: 26%;
     --aim-highlight: rgba(255, 179, 0, 0.5);
     --changed-highlight: rgba(100, 150, 255, 0.35);
+    --review-mark: rgba(255, 90, 80, 0.38);
+    --review-mark-line: #f0877a;
   }
 }
 
@@ -153,11 +159,7 @@ kbd {
      than the toolbar. Scroll it rather than putting controls out of reach. */
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: none;
-}
-
-#bar::-webkit-scrollbar {
-  display: none;
+  scrollbar-width: thin;
 }
 
 .group {
@@ -402,6 +404,114 @@ body.has-tabs #tabs {
   flex: 1 1 auto;
   min-height: 0;
   background: var(--desk);
+}
+
+#reviewPane {
+  display: none;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 280px;
+  z-index: 3;
+  flex-direction: column;
+  border-left: 1px solid var(--rule);
+  background: var(--chrome);
+  color: var(--fg);
+}
+
+body.review-open #reviewPane {
+  display: flex;
+}
+
+body.review-open #viewerContainer,
+body.review-open #imageStage,
+body.review-open #markdownStage {
+  right: 280px;
+}
+
+.review-head {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--rule);
+  font-weight: 600;
+}
+
+#reviewList {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 8px;
+}
+
+.review-empty {
+  padding: 12px 8px;
+  color: var(--fg-dim);
+  line-height: 1.4;
+}
+
+.review-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid var(--widget-border);
+  border-radius: 6px;
+  background: var(--widget);
+}
+
+.review-row.on {
+  border-color: var(--review-mark-line);
+}
+
+.review-loc {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.review-quote {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  max-height: 4.2em;
+  overflow: hidden;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.review-comment {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.review-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.review-actions button {
+  min-width: 0;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+mark.review,
+.review-block {
+  background: var(--review-mark);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.page.review-page {
+  outline: 2px solid var(--review-mark-line);
+  outline-offset: 2px;
 }
 
 #viewerContainer {
@@ -665,8 +775,7 @@ body:not(.kind-markdown) .md-only {
 }
 
 body.kind-image .not-image,
-body.kind-json #ask,
-body.kind-json #note {
+body:not(.kind-pdf):not(.kind-markdown) .review-only {
   display: none;
 }
 
@@ -918,6 +1027,11 @@ body.mode-sepia #markdownStage {
   #empty,
   #viewerContainer,
   #imageStage {
+    display: none !important;
+  }
+
+  #reviewPane,
+  #noteBox {
     display: none !important;
   }
 

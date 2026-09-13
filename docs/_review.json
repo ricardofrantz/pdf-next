@@ -1,8 +1,9 @@
 {
-  "$comment": "One review record. Markdown and PDF only differ in `at`. Ask copies a record; Notes appends one. The sidecar next to the document is `_review.json`.",
-  "format": 1,
+  "$comment": "One review record. Markdown and PDF only differ in `at`. The sidecar next to paper.pdf is paper_review.json. The Review panel lists these; marks are painted from them.",
+  "format": 2,
   "reviews": [
     {
+      "id": "r1",
       "file": "collab.md",
       "kind": "markdown",
       "at": { "line": 12, "end": 18 },
@@ -10,6 +11,7 @@
       "comment": "tighten this"
     },
     {
+      "id": "r2",
       "file": "paper.pdf",
       "kind": "pdf",
       "at": { "page": 7 },

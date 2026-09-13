@@ -165,13 +165,24 @@ struct Opening {
     target: Target,
 }
 
-/// The review sidecar next to a document. One name, both kinds.
-const REVIEW_FILE: &str = "_review.json";
+/// Leftover 0.10 sidecar in a folder. 0.11 reads it, then writes per file.
+const LEGACY_REVIEW_FILE: &str = "_review.json";
+const REVIEW_SUFFIX: &str = "_review.json";
 
 fn is_review_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case(REVIEW_FILE))
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(REVIEW_SUFFIX))
+}
+
+fn review_sidecar(doc: &Path) -> PathBuf {
+    let stem = doc
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    doc.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}{REVIEW_SUFFIX}"))
 }
 
 fn kind_for(path: &Path) -> &'static str {
@@ -1281,6 +1292,8 @@ struct ReviewAt {
 /// One review record. Markdown and PDF share these keys; only `at` differs.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct Review {
+    #[serde(default)]
+    id: String,
     file: String,
     kind: String,
     at: ReviewAt,
@@ -1293,6 +1306,13 @@ struct Review {
 struct ReviewFile {
     format: u32,
     reviews: Vec<Review>,
+}
+
+fn empty_store() -> ReviewFile {
+    ReviewFile {
+        format: 2,
+        reviews: Vec::new(),
+    }
 }
 
 fn review_basename(name: &str) -> bool {
@@ -1356,18 +1376,109 @@ fn drop_redundant_end(review: &mut Review) {
     }
 }
 
-/// Read-merge-write `_review.json` next to an open document.
-///
-/// The document must be in `allowed` — the same set `read_markdown` uses.
-/// The sidecar is always `_review.json` in that folder. A review of the
-/// sidecar itself is refused.
-fn write_review(
-    document: &str,
-    mut review: Review,
-    allowed: &HashSet<PathBuf>,
-) -> Result<String, String> {
-    validate_review(&review)?;
+fn parse_store(text: &str) -> Result<ReviewFile, String> {
+    if text.trim().is_empty() {
+        return Ok(empty_store());
+    }
+    let mut parsed: ReviewFile = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    if parsed.format != 1 && parsed.format != 2 {
+        return Err("unsupported review format".into());
+    }
+    ensure_ids(&mut parsed.reviews);
+    parsed.format = 2;
+    Ok(parsed)
+}
 
+fn ensure_ids(reviews: &mut [Review]) {
+    let mut max = reviews
+        .iter()
+        .filter_map(|review| {
+            review
+                .id
+                .strip_prefix('r')
+                .and_then(|rest| rest.parse::<u32>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    let mut seen = HashSet::new();
+    for review in reviews.iter_mut() {
+        let fresh = review.id.is_empty() || !seen.insert(review.id.clone());
+        if fresh {
+            max += 1;
+            review.id = format!("r{max}");
+            seen.insert(review.id.clone());
+        }
+    }
+}
+
+fn next_review_id(reviews: &[Review]) -> String {
+    let max = reviews
+        .iter()
+        .filter_map(|review| {
+            review
+                .id
+                .strip_prefix('r')
+                .and_then(|rest| rest.parse::<u32>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    format!("r{}", max + 1)
+}
+
+fn save_store(sidecar: &Path, store: &ReviewFile) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(store).map_err(|error| error.to_string())?;
+    std::fs::write(sidecar, format!("{json}\n")).map_err(|error| error.to_string())
+}
+
+fn review_fingerprint(review: &Review) -> String {
+    format!(
+        "{}|{}|{}|{:?}|{}",
+        review.file, review.kind, review.quote, review.at, review.comment
+    )
+}
+
+/// Load `{stem}_review.json`, then fold in matching rows from a leftover
+/// folder `_review.json`. The merge stays in memory until the next write.
+fn load_store(doc_path: &Path) -> Result<(PathBuf, ReviewFile), String> {
+    let sidecar = review_sidecar(doc_path);
+    let mut store = if sidecar.exists() {
+        parse_store(&std::fs::read_to_string(&sidecar).map_err(|error| error.to_string())?)?
+    } else {
+        empty_store()
+    };
+    let legacy = doc_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(LEGACY_REVIEW_FILE);
+    if legacy.exists() {
+        let basename = doc_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let old = parse_store(&std::fs::read_to_string(&legacy).map_err(|error| error.to_string())?)?;
+        let have: HashSet<String> = store.reviews.iter().map(review_fingerprint).collect();
+        for review in old.reviews {
+            if review.file == basename && !have.contains(&review_fingerprint(&review)) {
+                store.reviews.push(review);
+            }
+        }
+        ensure_ids(&mut store.reviews);
+    }
+    Ok((sidecar, store))
+}
+
+fn reviews_for_file(store: ReviewFile, basename: &str) -> ReviewFile {
+    ReviewFile {
+        format: 2,
+        reviews: store
+            .reviews
+            .into_iter()
+            .filter(|review| review.file == basename)
+            .collect(),
+    }
+}
+
+fn open_review_document(document: &str, allowed: &HashSet<PathBuf>) -> Result<PathBuf, String> {
     let doc_path =
         std::fs::canonicalize(PathBuf::from(document)).map_err(|error| error.to_string())?;
     let metadata = std::fs::metadata(&doc_path).map_err(|error| error.to_string())?;
@@ -1375,75 +1486,141 @@ fn write_review(
         return Err("document is not a regular file".into());
     }
     if is_review_file(&doc_path) {
-        return Err("cannot review _review.json itself".into());
+        return Err("cannot review a review file".into());
     }
-
     let kind = kind_for(&doc_path);
     if kind != "markdown" && kind != "pdf" {
         return Err("reviews are for markdown and pdf".into());
     }
-    if review.kind != kind {
-        return Err("review kind does not match the document".into());
-    }
-
-    let basename = doc_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "could not read the file name".to_string())?;
-    if review.file != basename {
-        return Err("review file does not match the document".into());
-    }
     if !allowed.contains(&doc_path) {
         return Err("file was never opened".into());
     }
-
-    let sidecar = doc_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(REVIEW_FILE);
-
-    let mut store = if sidecar.exists() {
-        let text = std::fs::read_to_string(&sidecar).map_err(|error| error.to_string())?;
-        if text.trim().is_empty() {
-            ReviewFile {
-                format: 1,
-                reviews: Vec::new(),
-            }
-        } else {
-            let parsed: ReviewFile =
-                serde_json::from_str(&text).map_err(|error| error.to_string())?;
-            if parsed.format != 1 {
-                return Err("unsupported _review.json format".into());
-            }
-            parsed
-        }
-    } else {
-        ReviewFile {
-            format: 1,
-            reviews: Vec::new(),
-        }
-    };
-
-    drop_redundant_end(&mut review);
-    store.reviews.push(review);
-
-    let json = serde_json::to_string_pretty(&store).map_err(|error| error.to_string())?;
-    std::fs::write(&sidecar, format!("{json}\n")).map_err(|error| error.to_string())?;
-    Ok(display_path(&sidecar))
+    Ok(doc_path)
 }
 
-/// Append one review record to `_review.json` next to the document.
+fn document_basename(doc_path: &Path) -> Result<String, String> {
+    doc_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| "could not read the file name".to_string())
+}
+
+/// Read-merge-write `{stem}_review.json` next to an open document.
+fn write_review(
+    document: &str,
+    mut review: Review,
+    allowed: &HashSet<PathBuf>,
+) -> Result<ReviewFile, String> {
+    validate_review(&review)?;
+    let doc_path = open_review_document(document, allowed)?;
+    let kind = kind_for(&doc_path);
+    if review.kind != kind {
+        return Err("review kind does not match the document".into());
+    }
+    let basename = document_basename(&doc_path)?;
+    if review.file != basename {
+        return Err("review file does not match the document".into());
+    }
+
+    let (sidecar, mut store) = load_store(&doc_path)?;
+    drop_redundant_end(&mut review);
+    review.id = next_review_id(&store.reviews);
+    store.reviews.push(review);
+    store.format = 2;
+    save_store(&sidecar, &store)?;
+    Ok(reviews_for_file(store, &basename))
+}
+
+fn list_reviews(document: &str, allowed: &HashSet<PathBuf>) -> Result<ReviewFile, String> {
+    let doc_path = open_review_document(document, allowed)?;
+    let basename = document_basename(&doc_path)?;
+    let (_sidecar, store) = load_store(&doc_path)?;
+    Ok(reviews_for_file(store, &basename))
+}
+
+fn change_review_comment(
+    document: &str,
+    id: &str,
+    comment: &str,
+    allowed: &HashSet<PathBuf>,
+) -> Result<ReviewFile, String> {
+    if comment.len() > 2_000 {
+        return Err("comment is too long (max 2 000 chars)".into());
+    }
+    if id.is_empty() {
+        return Err("review id is missing".into());
+    }
+    let doc_path = open_review_document(document, allowed)?;
+    let basename = document_basename(&doc_path)?;
+    let (sidecar, mut store) = load_store(&doc_path)?;
+    let Some(review) = store.reviews.iter_mut().find(|review| review.id == id) else {
+        return Err("review not found".into());
+    };
+    review.comment = comment.trim().to_string();
+    store.format = 2;
+    save_store(&sidecar, &store)?;
+    Ok(reviews_for_file(store, &basename))
+}
+
+fn remove_review(
+    document: &str,
+    id: &str,
+    allowed: &HashSet<PathBuf>,
+) -> Result<ReviewFile, String> {
+    if id.is_empty() {
+        return Err("review id is missing".into());
+    }
+    let doc_path = open_review_document(document, allowed)?;
+    let basename = document_basename(&doc_path)?;
+    let (sidecar, mut store) = load_store(&doc_path)?;
+    let before = store.reviews.len();
+    store.reviews.retain(|review| review.id != id);
+    if store.reviews.len() == before {
+        return Err("review not found".into());
+    }
+    store.format = 2;
+    save_store(&sidecar, &store)?;
+    Ok(reviews_for_file(store, &basename))
+}
+
+fn allowed_set(watched: &Watched) -> Result<HashSet<PathBuf>, String> {
+    let state = watched.0.lock().map_err(|error| error.to_string())?;
+    Ok(state.allowed.clone())
+}
+
+/// Append one review record to `{stem}_review.json` next to the document.
 #[tauri::command]
 fn append_review(
     document: String,
     review: Review,
     watched: State<'_, Watched>,
-) -> Result<String, String> {
-    let allowed = {
-        let state = watched.0.lock().map_err(|error| error.to_string())?;
-        state.allowed.clone()
-    };
-    write_review(&document, review, &allowed)
+) -> Result<ReviewFile, String> {
+    write_review(&document, review, &allowed_set(&watched)?)
+}
+
+#[tauri::command]
+fn read_reviews(document: String, watched: State<'_, Watched>) -> Result<ReviewFile, String> {
+    list_reviews(&document, &allowed_set(&watched)?)
+}
+
+#[tauri::command]
+fn update_review(
+    document: String,
+    id: String,
+    comment: String,
+    watched: State<'_, Watched>,
+) -> Result<ReviewFile, String> {
+    change_review_comment(&document, &id, &comment, &allowed_set(&watched)?)
+}
+
+#[tauri::command]
+fn delete_review(
+    document: String,
+    id: String,
+    watched: State<'_, Watched>,
+) -> Result<ReviewFile, String> {
+    remove_review(&document, &id, &allowed_set(&watched)?)
 }
 
 /// Open a link from a markdown file in the default browser.
@@ -1640,7 +1817,7 @@ usage: pdf-next [files...] [flags]
   pdf-next 'paper.pdf#page=7&search=wake'  the same, written as a link
 
 files   .pdf  .png .jpg .jpeg .webp .avif .gif .bmp  .md .markdown
-        `_review.json` next to a document (the review sidecar)
+        `*_review.json` next to a document (the Review panel sidecar)
         A file may carry a fragment saying where to land in it, in the form
         PDF links use: page=N, nameddest=NAME, search=TEXT, joined by &, with
         spaces written %20. Markdown adds line=N, the counterpart of page=N.
@@ -2077,7 +2254,10 @@ fn main() {
             print_document,
             set_title,
             smoke_report,
-            append_review
+            append_review,
+            read_reviews,
+            update_review,
+            delete_review
         ])
         .setup(move |app| {
             if let Some(seconds) = launch.poll {
@@ -2151,8 +2331,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        natural_key, open_download, open_link, parse_cli, render_markdown, write_review, Cli,
-        Review, ReviewAt, Target,
+        change_review_comment, list_reviews, natural_key, open_download, open_link, parse_cli,
+        remove_review, render_markdown, write_review, Cli, Review, ReviewAt, Target,
     };
     use std::collections::HashSet;
     use std::ffi::OsString;
@@ -2564,6 +2744,7 @@ mod tests {
 
     fn markdown_review() -> Review {
         Review {
+            id: String::new(),
             file: "collab.md".into(),
             kind: "markdown".into(),
             at: ReviewAt {
@@ -2578,6 +2759,7 @@ mod tests {
 
     fn pdf_review() -> Review {
         Review {
+            id: String::new(),
             file: "paper.pdf".into(),
             kind: "pdf".into(),
             at: ReviewAt {
@@ -2606,7 +2788,7 @@ mod tests {
     #[test]
     fn write_review_refuses_review_file() {
         let dir = scratch("review_self");
-        let sidecar = dir.join("_review.json");
+        let sidecar = dir.join("collab_review.json");
         std::fs::write(&sidecar, "{}\n").unwrap();
         let canonical = std::fs::canonicalize(&sidecar).unwrap();
         let mut allowed = HashSet::new();
@@ -2618,7 +2800,7 @@ mod tests {
             &allowed,
         )
         .unwrap_err();
-        assert!(err.contains("_review.json"), "{err}");
+        assert!(err.contains("review file"), "{err}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2664,39 +2846,131 @@ mod tests {
 
         let first = write_review(&md.display().to_string(), markdown_review(), &allowed).unwrap();
         let second = write_review(&pdf.display().to_string(), pdf_review(), &allowed).unwrap();
-        assert_eq!(first, second);
+        assert_eq!(first.reviews.len(), 1);
+        assert_eq!(second.reviews.len(), 1);
+        assert!(dir.join("collab_review.json").exists());
+        assert!(dir.join("paper_review.json").exists());
+        assert!(!dir.join("_review.json").exists());
 
-        let sidecar = dir.join("_review.json");
-        let store: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
-        assert_eq!(store["format"], 1);
-        let reviews = store["reviews"].as_array().expect("reviews array");
-        assert_eq!(reviews.len(), 2);
-
-        let md_keys: HashSet<_> = reviews[0]
+        let md_store: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("collab_review.json")).unwrap(),
+        )
+        .unwrap();
+        let pdf_store: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("paper_review.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(md_store["format"], 2);
+        assert_eq!(pdf_store["format"], 2);
+        let md_keys: HashSet<_> = md_store["reviews"][0]
             .as_object()
             .unwrap()
             .keys()
             .cloned()
             .collect();
-        let pdf_keys: HashSet<_> = reviews[1]
+        let pdf_keys: HashSet<_> = pdf_store["reviews"][0]
             .as_object()
             .unwrap()
             .keys()
             .cloned()
             .collect();
         assert_eq!(md_keys, pdf_keys);
-        for key in ["file", "kind", "at", "quote", "comment"] {
+        for key in ["id", "file", "kind", "at", "quote", "comment"] {
             assert!(md_keys.contains(key), "missing {key}");
         }
-        assert_eq!(reviews[0]["kind"], "markdown");
-        assert_eq!(reviews[0]["at"]["line"], 12);
-        assert_eq!(reviews[0]["at"]["end"], 18);
-        assert!(reviews[0]["at"].get("page").is_none());
-        assert_eq!(reviews[1]["kind"], "pdf");
-        assert_eq!(reviews[1]["at"]["page"], 7);
-        assert!(reviews[1]["at"].get("line").is_none());
-        assert!(store.get("$comment").is_none());
+        assert_eq!(md_store["reviews"][0]["id"], "r1");
+        assert_eq!(md_store["reviews"][0]["kind"], "markdown");
+        assert_eq!(pdf_store["reviews"][0]["kind"], "pdf");
+        assert_eq!(pdf_store["reviews"][0]["at"]["page"], 7);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_reviews_reads_legacy_folder_sidecar() {
+        let dir = scratch("review_legacy");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        std::fs::write(
+            dir.join("_review.json"),
+            r#"{
+              "format": 1,
+              "reviews": [
+                {
+                  "file": "paper.pdf",
+                  "kind": "pdf",
+                  "at": { "page": 7 },
+                  "quote": "legacy quote",
+                  "comment": "from 0.10"
+                },
+                {
+                  "file": "other.md",
+                  "kind": "markdown",
+                  "at": { "line": 1 },
+                  "quote": "other",
+                  "comment": "skip"
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let mut allowed = HashSet::new();
+        allowed.insert(std::fs::canonicalize(&pdf).unwrap());
+
+        let listed = list_reviews(&pdf.display().to_string(), &allowed).unwrap();
+        assert_eq!(listed.reviews.len(), 1);
+        assert_eq!(listed.reviews[0].file, "paper.pdf");
+        assert_eq!(listed.reviews[0].quote, "legacy quote");
+        assert_eq!(listed.reviews[0].id, "r1");
+        assert!(!dir.join("paper_review.json").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_review_changes_only_that_comment() {
+        let dir = scratch("review_update");
+        let md = dir.join("collab.md");
+        std::fs::write(&md, "# hi\n").unwrap();
+        let mut allowed = HashSet::new();
+        allowed.insert(std::fs::canonicalize(&md).unwrap());
+        let path = md.display().to_string();
+
+        write_review(&path, markdown_review(), &allowed).unwrap();
+        let mut second = markdown_review();
+        second.quote = "another passage".into();
+        second.comment = "second".into();
+        let stored = write_review(&path, second, &allowed).unwrap();
+        assert_eq!(stored.reviews.len(), 2);
+
+        let updated = change_review_comment(&path, "r1", "edited", &allowed).unwrap();
+        assert_eq!(updated.reviews.len(), 2);
+        let first = updated.reviews.iter().find(|review| review.id == "r1").unwrap();
+        let other = updated.reviews.iter().find(|review| review.id == "r2").unwrap();
+        assert_eq!(first.comment, "edited");
+        assert_eq!(other.comment, "second");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_review_drops_one_object() {
+        let dir = scratch("review_delete");
+        let md = dir.join("collab.md");
+        std::fs::write(&md, "# hi\n").unwrap();
+        let mut allowed = HashSet::new();
+        allowed.insert(std::fs::canonicalize(&md).unwrap());
+        let path = md.display().to_string();
+
+        write_review(&path, markdown_review(), &allowed).unwrap();
+        let mut second = markdown_review();
+        second.quote = "another passage".into();
+        let stored = write_review(&path, second, &allowed).unwrap();
+        assert_eq!(stored.reviews.len(), 2);
+
+        let left = remove_review(&path, "r1", &allowed).unwrap();
+        assert_eq!(left.reviews.len(), 1);
+        assert_eq!(left.reviews[0].id, "r2");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -68,7 +68,7 @@ that survives a build deleting and recreating the file mid-compile.
   in Latin Modern — no JavaScript math engine, nothing fetched, and the MathML meets the same
   sanitizer as the prose.
 - **Markdown typography:** Rendered text is set in Latin Modern Roman at 17 px on a 38 em measure, hyphenated with `text-wrap: pretty` for natural word breaks. Zoom reflows the text rather than scaling it.
-- **Ask and notes, one record.** Select text in Markdown or a PDF — the locator is the only difference (`at.line` vs `at.page`). `Ctrl+Shift+A` copies that record as a Markdown quote headed by `collab.md:12-18` or `paper.pdf p.7`, for a session. `Ctrl+Shift+N` adds a comment and appends the same record to `_review.json` next to the file — one sidecar, both kinds, append-only. A toolbar button opens it. The app writes only that file, only for a document you have open, and will not review `_review.json` itself. Capped at 20,000 characters of quote; not available for images.
+- **Ask and the Review panel.** Select text in Markdown or a PDF — the locator is the only difference (`at.line` vs `at.page`). `Ctrl+Shift+A` copies that record as a Markdown quote headed by `collab.md:12-18` or `paper.pdf p.7`. `Ctrl+Shift+N` adds a comment; the passage stays marked in red, and the Review panel on the right lists it so you can jump back, edit the comment, or delete it (`Ctrl+Shift+R` toggles the panel). Each file owns `{stem}_review.json` (`paper.pdf` → `paper_review.json`). The app writes only that sidecar, only for a document you have open. Capped at 20,000 characters of quote; not available for images.
 - **Changed blocks light up on reload:** When a Markdown file rewrites, changed and new paragraphs, headings, list items, tables and equations fade from a highlight over a few seconds. The comparison is by content: adding a paragraph marks only that one. Scroll position is kept.
 - **Links go where you would expect.** A `#heading` or footnote scrolls; a web link opens in
   your browser; a relative link — `[notes](other.md)`, `[fig](fig1.png)`, the paper it
@@ -95,7 +95,7 @@ that survives a build deleting and recreating the file mid-compile.
   sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
   same size follows the first one, as it does in every other viewer. If the machine has nothing
   to print to — no printer, or a stopped print service — it says so rather than opening nothing.
-- **The title says which build you are running** — `paper.pdf — pdf-next 0.10.0` — so a bug report
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.11.0` — so a bug report
   can name a version without hunting for an about box.
 - **Tells you when there is a newer version.** A few seconds after launch the app asks
   GitHub for the latest release, once; if it is newer, the last toolbar button lights up and a
@@ -105,7 +105,7 @@ that survives a build deleting and recreating the file mid-compile.
   own, downloads only ever happen on a press, and GitHub is the only host it can reach.
 - **Keyboard first:** `j`/`k` scroll, `n`/`p` pages, `g`/`G` first and last, `+`/`-` zoom,
   `←`/`→` tabs (or folder, with one file open), `Ctrl+W` close, `Ctrl+F` find, `Ctrl+R` reload,
-  `Ctrl+O` open, `Ctrl+P` print, `Ctrl+U` raw markdown, `Ctrl+Shift+A` ask, `Ctrl+Shift+N` notes,
+  `Ctrl+O` open, `Ctrl+P` print, `Ctrl+U` raw markdown, `Ctrl+Shift+A` ask, `Ctrl+Shift+N` add a review, `Ctrl+Shift+R` Review panel,
   `Ctrl+Shift+F` fit window to content,
   `Ctrl+Shift+←`/`→`/`↑`/`↓` dock to a screen half, `Ctrl+Shift+Enter` undock.
 ## Install

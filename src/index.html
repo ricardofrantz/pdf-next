@@ -90,6 +90,9 @@
       <symbol id="i-ask" viewBox="0 0 16 16" fill="none">
         <path d="M3 14L4 10H2C1.45 10 1 9.55 1 9V3C1 2.45 1.45 2 2 2H12C12.55 2 13 2.45 13 3V9C13 9.55 12.55 10 12 10H6L3 14Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
       </symbol>
+      <symbol id="i-review" viewBox="0 0 16 16" fill="none">
+        <path d="M3 3.5H13M3 8H13M3 12.5H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </symbol>
     </svg>
 
     <header id="bar">
@@ -151,14 +154,14 @@
         <button id="raw" type="button" class="md-only" title="Show the raw markdown (Ctrl+U)" aria-label="Show the raw markdown" aria-pressed="false">
           <svg class="icon"><use href="#i-raw"/></svg>
         </button>
-        <button id="ask" type="button" class="not-image" title="Copy the selection as a review quote (Ctrl+Shift+A)" aria-label="Copy selection for a session">
+        <button id="ask" type="button" class="review-only" title="Copy the selection as a review quote (Ctrl+Shift+A)" aria-label="Copy selection for a session">
           <svg class="icon"><use href="#i-ask"/></svg>
         </button>
-        <button id="note" type="button" class="not-image" title="Add a review of the selection (Ctrl+Shift+N)" aria-label="Add a review of the selection">
+        <button id="note" type="button" class="review-only" title="Add a review of the selection (Ctrl+Shift+N)" aria-label="Add a review of the selection">
           <svg class="icon"><use href="#i-ask"/></svg>
         </button>
-        <button id="notes" type="button" class="not-image" title="Open _review.json" aria-label="Open _review.json">
-          <svg class="icon"><use href="#i-ask"/></svg>
+        <button id="notes" type="button" class="review-only" title="Review panel (Ctrl+Shift+R)" aria-label="Review panel" aria-pressed="false">
+          <svg class="icon"><use href="#i-review"/></svg>
         </button>
         <button id="print" type="button" title="Print (Ctrl+P)" aria-label="Print">
           <svg class="icon"><use href="#i-print"/></svg>
@@ -233,6 +236,11 @@
           <svg class="icon"><use href="#i-close"/></svg>
         </button>
       </div>
+
+      <aside id="reviewPane" hidden>
+        <div class="review-head">Review</div>
+        <div id="reviewList"></div>
+      </aside>
 
       <div id="noteBox" hidden>
         <div id="noteRef"></div>

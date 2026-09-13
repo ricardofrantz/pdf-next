@@ -93,6 +93,8 @@ const ui = {
   noteRef: el('noteRef'),
   noteText: el('noteText'),
   noteSave: el('noteSave'),
+  reviewPane: el('reviewPane'),
+  reviewList: el('reviewList'),
 };
 
 const state = {
@@ -128,7 +130,10 @@ const state = {
   // Blocks extracted from rendered markdown, per path: { path, texts: string[] }
   markdownBlocks: null,
   pendingNote: null,
-  reviewPath: null,
+  reviews: [],
+  selectedReviewId: null,
+  reviewOpen: false,
+  reviewGrown: false,
 };
 
 // One worker for the life of the process. getDocument would otherwise spawn a
@@ -638,6 +643,7 @@ function highlightChangedBlocks(indices, blocks) {
 // A reading column plus its margins. The window a fresh markdown file opens
 // into, before the reader resizes it and the per-file memory takes over.
 const MARKDOWN_WINDOW_WIDTH = 780;
+const REVIEW_PANE_WIDTH = 280;
 
 /// Rendered or raw. Both nodes stay in the DOM with the same content, so the
 /// toggle is a visibility flip — no re-render, no IPC round trip.
@@ -1122,6 +1128,12 @@ async function openFile(
     } else if (file.kind === 'json') {
       await showJson(file, view, generation, !view && !keepWindow);
     }
+    if (file.kind === 'markdown' || file.kind === 'pdf') {
+      await loadReviews();
+    } else {
+      await setReviewOpen(false);
+      applyReviewStore({ reviews: [] });
+    }
     document.body.classList.remove('file-missing');
   } catch (error) {
     // A load cancelled by a newer rebuild is expected, not a failure to report.
@@ -1494,6 +1506,9 @@ async function closeAll() {
   closeFind();
   ui.noteBox.hidden = true;
   ui.noteText.value = '';
+  state.reviewGrown = false;
+  await setReviewOpen(false);
+  applyReviewStore({ reviews: [] });
   setStatus('');
 }
 
@@ -2097,14 +2112,19 @@ async function saveNote() {
   };
 
   try {
-    const reviewPath = await invoke('append_review', {
+    const store = await invoke('append_review', {
       document: state.file.path,
       review,
     });
-    setStatus(`Review saved to ${basenameFromPath(reviewPath)}`);
-    state.reviewPath = reviewPath;
+    applyReviewStore(store);
     ui.noteBox.hidden = true;
     ui.noteText.value = '';
+    await setReviewOpen(true);
+    const added = store.reviews[store.reviews.length - 1];
+    if (added?.id) {
+      selectReview(added.id);
+    }
+    setStatus('Review saved');
   } catch (error) {
     setStatus(String(error), { error: true });
   }
@@ -2133,30 +2153,278 @@ async function askSelection() {
   }
 }
 
-function sidecarPath(docPath) {
-  const cut = Math.max(docPath.lastIndexOf('/'), docPath.lastIndexOf('\\'));
-  const dir = cut >= 0 ? docPath.slice(0, cut + 1) : '';
-  return `${dir}_review.json`;
+function applyReviewStore(store) {
+  state.reviews = Array.isArray(store?.reviews) ? store.reviews : [];
+  renderReviewList();
+  paintReviewMarks();
 }
 
-async function openReviews() {
-  if (!state.file) {
-    setStatus('No file open');
+async function loadReviews() {
+  if (!state.file || (state.file.kind !== 'markdown' && state.file.kind !== 'pdf')) {
+    applyReviewStore({ reviews: [] });
     return;
   }
-  if (state.file.kind === 'json') {
-    return;
-  }
-  const path = sidecarPath(state.file.path);
   try {
-    const file = await invoke('open_path', { path });
-    await openInTab(file);
+    applyReviewStore(await invoke('read_reviews', { document: state.file.path }));
   } catch (error) {
-    const message = String(error);
-    setStatus(/does not exist/i.test(message) ? 'No reviews yet' : message, {
-      error: true,
-    });
+    applyReviewStore({ reviews: [] });
+    if (!/never opened|does not exist/i.test(String(error))) {
+      setStatus(String(error), { error: true });
+    }
   }
+}
+
+function renderReviewList() {
+  ui.reviewList.textContent = '';
+  if (!state.reviews.length) {
+    const empty = document.createElement('p');
+    empty.className = 'review-empty';
+    empty.textContent = 'No reviews yet — select text and press Ctrl+Shift+N.';
+    ui.reviewList.append(empty);
+    return;
+  }
+  for (const review of state.reviews) {
+    const row = document.createElement('article');
+    row.className = 'review-row';
+    row.dataset.reviewId = review.id;
+    if (review.id === state.selectedReviewId) {
+      row.classList.add('on');
+    }
+
+    const loc = document.createElement('div');
+    loc.className = 'review-loc';
+    loc.textContent = formatSelection(review);
+    row.append(loc);
+
+    const quote = document.createElement('blockquote');
+    quote.className = 'review-quote';
+    quote.textContent = review.quote;
+    row.append(quote);
+
+    const comment = document.createElement('textarea');
+    comment.className = 'review-comment';
+    comment.rows = 2;
+    comment.value = review.comment || '';
+    comment.addEventListener('click', (event) => event.stopPropagation());
+    row.append(comment);
+
+    const actions = document.createElement('div');
+    actions.className = 'review-actions';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.textContent = 'Save';
+    save.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void updateReviewComment(review.id, comment.value);
+    });
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = 'Delete';
+    remove.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void deleteReview(review.id);
+    });
+    actions.append(save, remove);
+    row.append(actions);
+
+    row.addEventListener('click', () => {
+      selectReview(review.id);
+      void jumpToReview(review);
+    });
+    ui.reviewList.append(row);
+  }
+}
+
+function selectReview(id) {
+  state.selectedReviewId = id;
+  for (const row of ui.reviewList.querySelectorAll('.review-row')) {
+    row.classList.toggle('on', row.dataset.reviewId === id);
+  }
+}
+
+async function setReviewOpen(on) {
+  const was = state.reviewOpen;
+  state.reviewOpen = Boolean(on);
+  document.body.classList.toggle('review-open', state.reviewOpen);
+  ui.reviewPane.hidden = !state.reviewOpen;
+  ui.notes.classList.toggle('on', state.reviewOpen);
+  ui.notes.setAttribute('aria-pressed', String(state.reviewOpen));
+  if (state.reviewOpen && !was && !state.reviewGrown) {
+    try {
+      const [width, height] = await invoke('window_size');
+      await invoke('fit_window', {
+        width: width + REVIEW_PANE_WIDTH,
+        height,
+        recenter: false,
+        exact: true,
+      });
+      state.reviewGrown = true;
+    } catch {
+      // The pane still opens; the stage just shares the current width.
+    }
+  }
+}
+
+function toggleReviewPanel() {
+  if (!state.file || (state.file.kind !== 'markdown' && state.file.kind !== 'pdf')) {
+    setStatus('Open a PDF or markdown file first');
+    return;
+  }
+  void setReviewOpen(!state.reviewOpen);
+}
+
+async function updateReviewComment(id, comment) {
+  if (!state.file) {
+    return;
+  }
+  try {
+    applyReviewStore(
+      await invoke('update_review', { document: state.file.path, id, comment }),
+    );
+    selectReview(id);
+    setStatus('Review updated');
+  } catch (error) {
+    setStatus(String(error), { error: true });
+  }
+}
+
+async function deleteReview(id) {
+  if (!state.file) {
+    return;
+  }
+  if (!window.confirm('Delete this review?')) {
+    return;
+  }
+  try {
+    applyReviewStore(await invoke('delete_review', { document: state.file.path, id }));
+    if (state.selectedReviewId === id) {
+      state.selectedReviewId = null;
+    }
+    setStatus('Review deleted');
+  } catch (error) {
+    setStatus(String(error), { error: true });
+  }
+}
+
+async function jumpToReview(review) {
+  const target = {
+    page: review.at?.page || null,
+    line: review.at?.line || null,
+    nameddest: null,
+    search: review.quote || null,
+  };
+  if (target.page || target.line || target.search) {
+    await applyTarget(target);
+  }
+}
+
+function unwrapReviewMarks(root) {
+  if (!root) {
+    return;
+  }
+  for (const mark of [...root.querySelectorAll('mark.review')]) {
+    mark.replaceWith(document.createTextNode(mark.textContent));
+  }
+  for (const block of root.querySelectorAll('.review-block')) {
+    block.classList.remove('review-block');
+    delete block.dataset.reviewId;
+  }
+}
+
+function highlightQuote(root, quote, id) {
+  const needle = quote.replace(/\s+/g, ' ').trim();
+  if (!root || needle.length < 2) {
+    return false;
+  }
+  const snippet = needle.slice(0, 48).toLowerCase();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode())) {
+    const norm = node.textContent.replace(/\s+/g, ' ').toLowerCase();
+    if (!norm.includes(snippet.slice(0, Math.min(24, snippet.length)))) {
+      continue;
+    }
+    const mark = document.createElement('mark');
+    mark.className = 'review';
+    mark.dataset.reviewId = id;
+    node.parentNode.insertBefore(mark, node);
+    mark.appendChild(node);
+    return true;
+  }
+  return false;
+}
+
+function paintMarkdownMarks() {
+  unwrapReviewMarks(ui.markdown);
+  for (const review of state.reviews) {
+    const start = review.at?.line;
+    if (!start) {
+      continue;
+    }
+    const end = review.at.end || start;
+    const hosts = [];
+    for (const anchor of ui.markdown.querySelectorAll('[data-line]')) {
+      const line = Number(anchor.dataset.line);
+      if (line < start || line > end) {
+        continue;
+      }
+      const host =
+        anchor.parentElement && anchor.parentElement !== ui.markdown
+          ? anchor.parentElement
+          : anchor;
+      host.classList.add('review-block');
+      host.dataset.reviewId = review.id;
+      hosts.push(host);
+    }
+    for (const host of hosts) {
+      if (highlightQuote(host, review.quote, review.id)) {
+        break;
+      }
+    }
+  }
+}
+
+function paintPdfMarks() {
+  for (const page of ui.viewer.querySelectorAll('.page')) {
+    page.classList.remove('review-page');
+    unwrapReviewMarks(page.querySelector('.textLayer'));
+  }
+  for (const review of state.reviews) {
+    const start = review.at?.page;
+    if (!start) {
+      continue;
+    }
+    const end = review.at.end || start;
+    for (let pageNum = start; pageNum <= end; pageNum += 1) {
+      const page = ui.viewer.querySelector(`.page[data-page-number="${pageNum}"]`);
+      const layer = page?.querySelector('.textLayer');
+      if (!layer) {
+        continue;
+      }
+      if (!highlightQuote(layer, review.quote, review.id)) {
+        page.classList.add('review-page');
+      }
+    }
+  }
+}
+
+function paintReviewMarks() {
+  if (state.file?.kind === 'markdown') {
+    paintMarkdownMarks();
+  } else if (state.file?.kind === 'pdf') {
+    paintPdfMarks();
+  }
+}
+
+function reviewFromEvent(event) {
+  const host =
+    event.target instanceof Element
+      ? event.target.closest('[data-review-id], .review-page')
+      : null;
+  if (!host) {
+    return null;
+  }
+  return host.dataset.reviewId || null;
 }
 // ── Wiring ────────────────────────────────────────────────────────────────
 
@@ -2319,7 +2587,7 @@ ui.wrap.addEventListener('click', toggleWrap);
 ui.raw.addEventListener('click', () => setRaw(!state.markdownRaw));
 ui.ask.addEventListener('click', () => void askSelection());
 ui.note.addEventListener('click', () => void openNoteBox());
-ui.notes.addEventListener('click', () => void openReviews());
+ui.notes.addEventListener('click', () => toggleReviewPanel());
 
 // A link in a markdown file must not leave the page. A relative one —
 // `[notes](other.md)` — resolves against the app origin, which the navigation
@@ -2327,7 +2595,20 @@ ui.notes.addEventListener('click', () => void openReviews());
 // no way back. Rust now refuses relative URLs too; this is the second lock.
 // Only same-page anchors — footnotes, and headings that carry an id — do
 // anything, and they scroll rather than navigate.
+ui.container.addEventListener('click', (event) => {
+  const reviewId = reviewFromEvent(event);
+  if (reviewId) {
+    selectReview(reviewId);
+    void setReviewOpen(true);
+  }
+});
+
 ui.markdown.addEventListener('click', (event) => {
+  const reviewId = reviewFromEvent(event);
+  if (reviewId) {
+    selectReview(reviewId);
+    void setReviewOpen(true);
+  }
   const anchor =
     event.target instanceof Element ? event.target.closest('a[href]') : null;
   if (!anchor) {
@@ -2474,6 +2755,12 @@ ui.noteText.addEventListener('keydown', (event) => {
 ui.noteSave.addEventListener('click', () => void saveNote());
 
 
+eventBus.on('textlayerrendered', () => {
+  if (state.file?.kind === 'pdf' && state.reviews.length) {
+    paintPdfMarks();
+  }
+});
+
 eventBus.on('pagechanging', updatePageControls);
 eventBus.on('pagesloaded', updatePageControls);
 eventBus.on('scalechanging', (event) => {
@@ -2541,6 +2828,11 @@ window.addEventListener('keydown', (event) => {
       void openNoteBox();
       return;
     }
+  }
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 'r') {
+    event.preventDefault();
+    toggleReviewPanel();
+    return;
   }
   if ((event.ctrlKey || event.metaKey) && key === 'u') {
     event.preventDefault();

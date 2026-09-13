@@ -729,8 +729,7 @@ assert.match(
   'Register the current type on the webview, not the window: tao unwraps the older property list and would panic.',
 );
 
-// One selection record for Markdown and PDF. Ask copies it; Notes appends it
-// to `_review.json`. The human string is derived, not stored.
+// One selection record for Markdown and PDF. The Review panel lists them.
 assert.match(
   app,
   /function describeSelection\(\)[\s\S]*?return \{ file, kind: 'markdown', at: atRange\(start, end, 'line'\), quote \}/,
@@ -744,29 +743,50 @@ assert.match(
 assert.match(
   app,
   /invoke\('append_review', \{\s*document: state\.file\.path,\s*review,/,
-  'Notes must append a review record, not a markdown block.',
+  'A new review must append a record, not a markdown block.',
 );
-assert.doesNotMatch(app, /append_note/, 'append_note is gone; the sidecar is _review.json.');
+assert.match(page, /id="reviewPane"/, 'The Review panel lives on the right of the stage.');
+assert.match(
+  app,
+  /const REVIEW_PANE_WIDTH = 280/,
+  'Opening the Review panel must know how much width to grow.',
+);
+assert.match(
+  styles,
+  /body:not\(\.kind-pdf\):not\(\.kind-markdown\) \.review-only/,
+  'Ask and Review stay hidden until a PDF or Markdown file is open.',
+);
+assert.match(
+  JSON.stringify(config.app.windows[0]),
+  /"width":880/,
+  'The empty window must be wide enough for the toolbar.',
+);
+assert.match(
+  JSON.stringify(config.app.windows[0]),
+  /"height":520/,
+  'The empty window must be tall enough to read the drop target.',
+);
+assert.doesNotMatch(app, /append_note/, 'append_note is gone.');
 assert.doesNotMatch(app, /\.notes\.md/, 'The per-stem notes sidecar is gone.');
 assert.match(
   main,
-  /fn write_review\([\s\S]*?if !allowed\.contains\(&doc_path\)/,
-  'append_review must refuse a document that is not in the open set.',
+  /fn open_review_document\([\s\S]*?if !allowed\.contains\(&doc_path\)/,
+  'Review writes must refuse a document that is not in the open set.',
 );
 assert.match(
   main,
-  /const REVIEW_FILE: &str = "_review\.json"/,
-  'The sidecar next to the document is _review.json.',
+  /const REVIEW_SUFFIX: &str = "_review\.json"/,
+  'The sidecar is {stem}_review.json next to the document.',
 );
 assert.match(
   main,
-  /if is_review_file\(path\) \{\s*return "json";/,
-  '_review.json must be a showable kind so the toolbar can open it.',
+  /fn review_sidecar\(doc: &Path\)[\s\S]*?format!\("\{stem\}\{REVIEW_SUFFIX\}"\)/,
+  'paper.pdf must own paper_review.json.',
 );
 assert.match(
   readme,
-  /_review\.json/,
-  'The README must name the one sidecar, not two products.',
+  /paper_review\.json/,
+  'The README must name the per-file sidecar.',
 );
 assert.doesNotMatch(
   readme,
