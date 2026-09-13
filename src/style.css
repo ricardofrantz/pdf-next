@@ -544,7 +544,7 @@ body.mode-invert .pdfViewer .page .canvasWrapper {
 }
 
 
-#note {
+#noteBox {
   position: absolute;
   top: 10px;
   right: 16px;
@@ -559,7 +559,7 @@ body.mode-invert .pdfViewer .page .canvasWrapper {
   box-shadow: 0 4px 16px var(--shadow);
 }
 
-#note[hidden] {
+#noteBox[hidden] {
   display: none;
 }
 
@@ -664,7 +664,9 @@ body:not(.kind-markdown) .md-only {
   display: none;
 }
 
-body.kind-image .not-image {
+body.kind-image .not-image,
+body.kind-json #ask,
+body.kind-json #note {
   display: none;
 }
 
@@ -711,7 +713,11 @@ body.kind-image .not-image {
   --md-accent: #0b62c4;
 }
 
-body:not(.kind-markdown) #markdownStage {
+body:not(.kind-markdown):not(.kind-json) #markdownStage {
+  display: none;
+}
+
+body.kind-json #markdown {
   display: none;
 }
 

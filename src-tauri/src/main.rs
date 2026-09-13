@@ -14,7 +14,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{http, AppHandle, DragDropEvent, Emitter, Manager, State, Theme, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
@@ -165,7 +165,19 @@ struct Opening {
     target: Target,
 }
 
+/// The review sidecar next to a document. One name, both kinds.
+const REVIEW_FILE: &str = "_review.json";
+
+fn is_review_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(REVIEW_FILE))
+}
+
 fn kind_for(path: &Path) -> &'static str {
+    if is_review_file(path) {
+        return "json";
+    }
     match path
         .extension()
         .and_then(|value| value.to_str())
@@ -855,6 +867,28 @@ fn read_markdown(path: String, watched: State<'_, Watched>) -> Result<MarkdownDo
     Ok(MarkdownDoc { html, raw })
 }
 
+/// Raw text of an allowed `_review.json`. The sidecar is not Markdown, so it
+/// does not go through the renderer.
+#[tauri::command]
+fn read_json(path: String, watched: State<'_, Watched>) -> Result<String, String> {
+    let canonical =
+        std::fs::canonicalize(PathBuf::from(path)).map_err(|error| error.to_string())?;
+    {
+        let state = watched.0.lock().map_err(|error| error.to_string())?;
+        if !state.allowed.contains(&canonical) {
+            return Err("file was never opened".into());
+        }
+    }
+    if kind_for(&canonical) != "json" {
+        return Err("not a review file".into());
+    }
+    let metadata = std::fs::metadata(&canonical).map_err(|error| error.to_string())?;
+    if metadata.len() > MARKDOWN_LIMIT {
+        return Err("review file is larger than 10 MB".into());
+    }
+    std::fs::read_to_string(&canonical).map_err(|error| error.to_string())
+}
+
 // ── Serving document bytes ────────────────────────────────────────────────
 
 fn mime_for(path: &Path) -> &'static str {
@@ -872,6 +906,7 @@ fn mime_for(path: &Path) -> &'static str {
         Some("gif") => "image/gif",
         Some("bmp") => "image/bmp",
         Some("md" | "markdown") => "text/markdown",
+        Some("json") => "application/json",
         _ => "application/octet-stream",
     }
 }
@@ -1231,120 +1266,184 @@ struct Launch {
     smoke: bool,
 }
 
-/// Format a note block for appending to a notes file.
-///
-/// Produces the markdown block:
-/// ```
-/// ## <reference>
-///
-/// > <quote line 1>
-/// > <quote line 2>
-/// > ...
-///
-/// <comment>
-///
-/// ```
-///
-/// If comment is empty, the comment paragraph is omitted.
-fn note_block(reference: &str, quote: &str, comment: &str) -> String {
-    let mut result = format!("## {}\n\n", reference);
-
-    for line in quote.lines() {
-        result.push_str(&format!("> {}\n", line));
-    }
-
-    let comment = comment.trim();
-    if !comment.is_empty() {
-        result.push('\n');
-        result.push_str(comment);
-    }
-
-    result.push_str("\n\n");
-    result
+/// Where a selection sits. Markdown uses `line`; PDF uses `page`. `end` is
+/// the last line or page when the selection spans more than one.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+struct ReviewAt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    end: Option<u32>,
 }
 
-/// Append a note about a document selection to its notes sidecar.
-///
-/// The notes file is created at <document dir>/<stem>.notes.md. The document
-/// must be an existing regular file with a supported extension. Refuses if the
-/// document itself ends in `.notes.md` (no recursion).
-///
-/// Returns the notes path as a display string.
-#[tauri::command]
-fn append_note(
-    document: String,
-    reference: String,
+/// One review record. Markdown and PDF share these keys; only `at` differs.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct Review {
+    file: String,
+    kind: String,
+    at: ReviewAt,
     quote: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     comment: String,
-) -> Result<String, String> {
-    // Caps on quote and comment
-    if quote.len() > 20_000 {
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ReviewFile {
+    format: u32,
+    reviews: Vec<Review>,
+}
+
+fn review_basename(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains('\\') && name != ".." && name != "."
+}
+
+fn validate_review(review: &Review) -> Result<(), String> {
+    if review.quote.len() > 20_000 {
         return Err("quote is too long (max 20 000 chars)".into());
     }
-    if comment.len() > 2_000 {
+    if review.comment.len() > 2_000 {
         return Err("comment is too long (max 2 000 chars)".into());
     }
+    if !review_basename(&review.file) {
+        return Err("file must be a basename".into());
+    }
+    match review.kind.as_str() {
+        "markdown" => {
+            let line = review
+                .at
+                .line
+                .filter(|line| *line >= 1)
+                .ok_or_else(|| "markdown review needs at.line".to_string())?;
+            if review.at.page.is_some() {
+                return Err("markdown review must not have at.page".into());
+            }
+            if let Some(end) = review.at.end {
+                if end < line {
+                    return Err("at.end is before at.line".into());
+                }
+            }
+        }
+        "pdf" => {
+            let page = review
+                .at
+                .page
+                .filter(|page| *page >= 1)
+                .ok_or_else(|| "pdf review needs at.page".to_string())?;
+            if review.at.line.is_some() {
+                return Err("pdf review must not have at.line".into());
+            }
+            if let Some(end) = review.at.end {
+                if end < page {
+                    return Err("at.end is before at.page".into());
+                }
+            }
+        }
+        _ => return Err("kind must be markdown or pdf".into()),
+    }
+    Ok(())
+}
+
+fn drop_redundant_end(review: &mut Review) {
+    let start = if review.kind == "markdown" {
+        review.at.line
+    } else {
+        review.at.page
+    };
+    if review.at.end == start {
+        review.at.end = None;
+    }
+}
+
+/// Read-merge-write `_review.json` next to an open document.
+///
+/// The document must be in `allowed` — the same set `read_markdown` uses.
+/// The sidecar is always `_review.json` in that folder. A review of the
+/// sidecar itself is refused.
+fn write_review(
+    document: &str,
+    mut review: Review,
+    allowed: &HashSet<PathBuf>,
+) -> Result<String, String> {
+    validate_review(&review)?;
 
     let doc_path =
         std::fs::canonicalize(PathBuf::from(document)).map_err(|error| error.to_string())?;
-
-    // Check that it exists and is a regular file
     let metadata = std::fs::metadata(&doc_path).map_err(|error| error.to_string())?;
     if !metadata.is_file() {
         return Err("document is not a regular file".into());
     }
-
-    // Check extension is supported
-    if ![
-        "pdf", "png", "jpg", "jpeg", "webp", "avif", "gif", "bmp", "md", "markdown",
-    ]
-    .contains(&kind_for(&doc_path))
-    {
-        return Err("unsupported file type".into());
+    if is_review_file(&doc_path) {
+        return Err("cannot review _review.json itself".into());
     }
 
-    // Refuse if document itself is a notes file
-    if doc_path
+    let kind = kind_for(&doc_path);
+    if kind != "markdown" && kind != "pdf" {
+        return Err("reviews are for markdown and pdf".into());
+    }
+    if review.kind != kind {
+        return Err("review kind does not match the document".into());
+    }
+
+    let basename = doc_path
         .file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.ends_with(".notes.md"))
-        .unwrap_or(false)
-    {
-        return Err("cannot append notes about a notes file".into());
+        .ok_or_else(|| "could not read the file name".to_string())?;
+    if review.file != basename {
+        return Err("review file does not match the document".into());
+    }
+    if !allowed.contains(&doc_path) {
+        return Err("file was never opened".into());
     }
 
-    // Build notes path: same directory, <stem>.notes.md
-    let stem = doc_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| "could not extract file stem".to_string())?;
-    let notes_name = format!("{}.notes.md", stem);
-    let notes_path = doc_path
+    let sidecar = doc_path
         .parent()
-        .unwrap_or_else(|| Path::new("/"))
-        .join(&notes_name);
+        .unwrap_or_else(|| Path::new("."))
+        .join(REVIEW_FILE);
 
-    // Format the note block
-    let block = note_block(&reference, &quote, &comment);
-
-    // Read existing content, if any
-    let existing = if notes_path.exists() {
-        std::fs::read_to_string(&notes_path).map_err(|error| error.to_string())?
+    let mut store = if sidecar.exists() {
+        let text = std::fs::read_to_string(&sidecar).map_err(|error| error.to_string())?;
+        if text.trim().is_empty() {
+            ReviewFile {
+                format: 1,
+                reviews: Vec::new(),
+            }
+        } else {
+            let parsed: ReviewFile =
+                serde_json::from_str(&text).map_err(|error| error.to_string())?;
+            if parsed.format != 1 {
+                return Err("unsupported _review.json format".into());
+            }
+            parsed
+        }
     } else {
-        String::new()
+        ReviewFile {
+            format: 1,
+            reviews: Vec::new(),
+        }
     };
 
-    // Append: blank line before new block if file is non-empty
-    let new_content = if existing.is_empty() {
-        block
-    } else {
-        format!("{}\n{}", existing, block)
+    drop_redundant_end(&mut review);
+    store.reviews.push(review);
+
+    let json = serde_json::to_string_pretty(&store).map_err(|error| error.to_string())?;
+    std::fs::write(&sidecar, format!("{json}\n")).map_err(|error| error.to_string())?;
+    Ok(display_path(&sidecar))
+}
+
+/// Append one review record to `_review.json` next to the document.
+#[tauri::command]
+fn append_review(
+    document: String,
+    review: Review,
+    watched: State<'_, Watched>,
+) -> Result<String, String> {
+    let allowed = {
+        let state = watched.0.lock().map_err(|error| error.to_string())?;
+        state.allowed.clone()
     };
-
-    // Write back
-    std::fs::write(&notes_path, &new_content).map_err(|error| error.to_string())?;
-
-    Ok(display_path(&notes_path))
+    write_review(&document, review, &allowed)
 }
 
 /// Open a link from a markdown file in the default browser.
@@ -1541,6 +1640,7 @@ usage: pdf-next [files...] [flags]
   pdf-next 'paper.pdf#page=7&search=wake'  the same, written as a link
 
 files   .pdf  .png .jpg .jpeg .webp .avif .gif .bmp  .md .markdown
+        `_review.json` next to a document (the review sidecar)
         A file may carry a fragment saying where to land in it, in the form
         PDF links use: page=N, nameddest=NAME, search=TEXT, joined by &, with
         spaces written %20. Markdown adds line=N, the counterpart of page=N.
@@ -1970,13 +2070,14 @@ fn main() {
             launch_options,
             siblings,
             read_markdown,
+            read_json,
             snap,
             open_download,
             open_link,
             print_document,
             set_title,
             smoke_report,
-            append_note
+            append_review
         ])
         .setup(move |app| {
             if let Some(seconds) = launch.poll {
@@ -2050,10 +2151,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_note, natural_key, note_block, open_download, open_link, parse_cli, render_markdown,
-        Cli, Target,
+        natural_key, open_download, open_link, parse_cli, render_markdown, write_review, Cli,
+        Review, ReviewAt, Target,
     };
+    use std::collections::HashSet;
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     fn cli(words: &[&str]) -> Result<Cli, (i32, String)> {
         parse_cli(words.iter().map(OsString::from), None)
@@ -2447,127 +2550,154 @@ mod tests {
         );
     }
 
-    #[test]
-    fn formats_note_block_with_comment() {
-        let block = note_block("file.md:1-5", "line 1\nline 2", "This is a comment");
-        assert!(block.contains("## file.md:1-5"));
-        assert!(block.contains("> line 1"));
-        assert!(block.contains("> line 2"));
-        assert!(block.contains("This is a comment"));
-        assert!(block.ends_with("\n\n"));
-    }
-
-    #[test]
-    fn formats_note_block_without_comment() {
-        let block = note_block("file.md:1-5", "line 1", "");
-        assert!(block.contains("## file.md:1-5"));
-        assert!(block.contains("> line 1"));
-        assert!(!block.contains("\nline 1")); // no uncommented line
-        assert!(block.ends_with("\n\n"));
-    }
-
-    #[test]
-    fn appends_note_refuses_notes_file() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "pdf_next_notes_refuse_test_{}",
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pdf_next_{name}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let notes_path = temp_dir.join("test.notes.md");
-        std::fs::write(&notes_path, "# Notes\n").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
-        let result = append_note(
-            notes_path.display().to_string(),
-            "ref".to_string(),
-            "quote".to_string(),
-            "comment".to_string(),
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("notes file"));
+    fn markdown_review() -> Review {
+        Review {
+            file: "collab.md".into(),
+            kind: "markdown".into(),
+            at: ReviewAt {
+                line: Some(12),
+                end: Some(18),
+                page: None,
+            },
+            quote: "the selected passage".into(),
+            comment: "tighten this".into(),
+        }
+    }
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+    fn pdf_review() -> Review {
+        Review {
+            file: "paper.pdf".into(),
+            kind: "pdf".into(),
+            at: ReviewAt {
+                page: Some(7),
+                line: None,
+                end: None,
+            },
+            quote: "the selected passage".into(),
+            comment: "does the figure still match?".into(),
+        }
     }
 
     #[test]
-    fn appends_note_refuses_missing_file() {
-        let result = append_note(
-            "/tmp/nonexistent_file_xyz_12345.pdf".to_string(),
-            "ref".to_string(),
-            "quote".to_string(),
-            "comment".to_string(),
-        );
-        assert!(result.is_err());
+    fn write_review_refuses_outside_open_set() {
+        let dir = scratch("review_denied");
+        let doc = dir.join("collab.md");
+        std::fs::write(&doc, "# hi\n").unwrap();
+
+        let err = write_review(&doc.display().to_string(), markdown_review(), &HashSet::new())
+            .unwrap_err();
+        assert!(err.contains("never opened"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn appends_note_refuses_quote_over_cap() {
-        let long_quote = "x".repeat(20_001);
-        let result = append_note(
-            "/tmp/test.md".to_string(),
-            "ref".to_string(),
-            long_quote,
-            "comment".to_string(),
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("quote"));
+    fn write_review_refuses_review_file() {
+        let dir = scratch("review_self");
+        let sidecar = dir.join("_review.json");
+        std::fs::write(&sidecar, "{}\n").unwrap();
+        let canonical = std::fs::canonicalize(&sidecar).unwrap();
+        let mut allowed = HashSet::new();
+        allowed.insert(canonical);
+
+        let err = write_review(
+            &sidecar.display().to_string(),
+            markdown_review(),
+            &allowed,
+        )
+        .unwrap_err();
+        assert!(err.contains("_review.json"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn appends_note_refuses_comment_over_cap() {
-        let long_comment = "x".repeat(2_001);
-        let result = append_note(
-            "/tmp/test.md".to_string(),
-            "ref".to_string(),
-            "quote".to_string(),
-            long_comment,
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("comment"));
+    fn write_review_refuses_missing_file() {
+        let err = write_review(
+            "/tmp/nonexistent_file_xyz_12345.md",
+            markdown_review(),
+            &HashSet::new(),
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
     }
 
     #[test]
-    fn appends_note_creates_and_appends() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "pdf_next_notes_test_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp_dir).unwrap();
+    fn write_review_refuses_quote_over_cap() {
+        let mut review = markdown_review();
+        review.quote = "x".repeat(20_001);
+        let err = write_review("/tmp/test.md", review, &HashSet::new()).unwrap_err();
+        assert!(err.contains("quote"), "{err}");
+    }
 
-        let doc_path = temp_dir.join("test_doc.md");
-        std::fs::write(&doc_path, "# Test").unwrap();
+    #[test]
+    fn write_review_refuses_comment_over_cap() {
+        let mut review = markdown_review();
+        review.comment = "x".repeat(2_001);
+        let err = write_review("/tmp/test.md", review, &HashSet::new()).unwrap_err();
+        assert!(err.contains("comment"), "{err}");
+    }
 
-        let result1 = append_note(
-            doc_path.display().to_string(),
-            "test.md:1".to_string(),
-            "first quote".to_string(),
-            "first comment".to_string(),
-        );
-        assert!(result1.is_ok());
+    #[test]
+    fn write_review_appends_markdown_and_pdf_with_the_same_keys() {
+        let dir = scratch("review_append");
+        let md = dir.join("collab.md");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&md, "# hi\n").unwrap();
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
 
-        let result2 = append_note(
-            doc_path.display().to_string(),
-            "test.md:5".to_string(),
-            "second quote".to_string(),
-            "second comment".to_string(),
-        );
-        assert!(result2.is_ok());
+        let mut allowed = HashSet::new();
+        allowed.insert(std::fs::canonicalize(&md).unwrap());
+        allowed.insert(std::fs::canonicalize(&pdf).unwrap());
 
-        let notes_path = temp_dir.join("test_doc.notes.md");
-        let content = std::fs::read_to_string(&notes_path).unwrap();
+        let first = write_review(&md.display().to_string(), markdown_review(), &allowed).unwrap();
+        let second = write_review(&pdf.display().to_string(), pdf_review(), &allowed).unwrap();
+        assert_eq!(first, second);
 
-        // Both entries should be present
-        assert!(content.contains("## test.md:1"));
-        assert!(content.contains("## test.md:5"));
-        assert!(content.contains("first quote"));
-        assert!(content.contains("second quote"));
+        let sidecar = dir.join("_review.json");
+        let store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert_eq!(store["format"], 1);
+        let reviews = store["reviews"].as_array().expect("reviews array");
+        assert_eq!(reviews.len(), 2);
 
-        // Clean up
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        let md_keys: HashSet<_> = reviews[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let pdf_keys: HashSet<_> = reviews[1]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(md_keys, pdf_keys);
+        for key in ["file", "kind", "at", "quote", "comment"] {
+            assert!(md_keys.contains(key), "missing {key}");
+        }
+        assert_eq!(reviews[0]["kind"], "markdown");
+        assert_eq!(reviews[0]["at"]["line"], 12);
+        assert_eq!(reviews[0]["at"]["end"], 18);
+        assert!(reviews[0]["at"].get("page").is_none());
+        assert_eq!(reviews[1]["kind"], "pdf");
+        assert_eq!(reviews[1]["at"]["page"], 7);
+        assert!(reviews[1]["at"].get("line").is_none());
+        assert!(store.get("$comment").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -729,6 +729,51 @@ assert.match(
   'Register the current type on the webview, not the window: tao unwraps the older property list and would panic.',
 );
 
+// One selection record for Markdown and PDF. Ask copies it; Notes appends it
+// to `_review.json`. The human string is derived, not stored.
+assert.match(
+  app,
+  /function describeSelection\(\)[\s\S]*?return \{ file, kind: 'markdown', at: atRange\(start, end, 'line'\), quote \}/,
+  'describeSelection must return a review record, not a display string.',
+);
+assert.match(
+  app,
+  /function formatSelection\(record\)[\s\S]*?`\$\{record\.file\}:\$\{record\.at\.line\}\$\{end\}`[\s\S]*?`\$\{record\.file\} p\.\$\{record\.at\.page\}\$\{end\}`/,
+  'The human locator must be derived from the record.',
+);
+assert.match(
+  app,
+  /invoke\('append_review', \{\s*document: state\.file\.path,\s*review,/,
+  'Notes must append a review record, not a markdown block.',
+);
+assert.doesNotMatch(app, /append_note/, 'append_note is gone; the sidecar is _review.json.');
+assert.doesNotMatch(app, /\.notes\.md/, 'The per-stem notes sidecar is gone.');
+assert.match(
+  main,
+  /fn write_review\([\s\S]*?if !allowed\.contains\(&doc_path\)/,
+  'append_review must refuse a document that is not in the open set.',
+);
+assert.match(
+  main,
+  /const REVIEW_FILE: &str = "_review\.json"/,
+  'The sidecar next to the document is _review.json.',
+);
+assert.match(
+  main,
+  /if is_review_file\(path\) \{\s*return "json";/,
+  '_review.json must be a showable kind so the toolbar can open it.',
+);
+assert.match(
+  readme,
+  /_review\.json/,
+  'The README must name the one sidecar, not two products.',
+);
+assert.doesNotMatch(
+  readme,
+  /\.notes\.md/,
+  'The README must not still describe <stem>.notes.md.',
+);
+
 // The fixtures the smoke test opens, one per kind the viewer claims to show.
 for (const fixture of [
   'tests/fixtures/hello.pdf',

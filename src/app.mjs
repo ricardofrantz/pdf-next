@@ -52,6 +52,7 @@ const ui = {
   wrap: el('wrap'),
   raw: el('raw'),
   ask: el('ask'),
+  notes: el('notes'),
   dockButtons: {
     left: el('dockLeft'),
     right: el('dockRight'),
@@ -88,6 +89,7 @@ const ui = {
   printRules: el('printRules'),
   status: el('status'),
   note: el('note'),
+  noteBox: el('noteBox'),
   noteRef: el('noteRef'),
   noteText: el('noteText'),
   noteSave: el('noteSave'),
@@ -126,7 +128,7 @@ const state = {
   // Blocks extracted from rendered markdown, per path: { path, texts: string[] }
   markdownBlocks: null,
   pendingNote: null,
-  notesPath: null,
+  reviewPath: null,
 };
 
 // One worker for the life of the process. getDocument would otherwise spawn a
@@ -221,9 +223,9 @@ function captureView() {
       left: ui.imageStage.scrollLeft,
     };
   }
-  if (state.file?.kind === 'markdown') {
+  if (state.file?.kind === 'markdown' || state.file?.kind === 'json') {
     return {
-      kind: 'markdown',
+      kind: state.file.kind,
       scale: state.markdownScale,
       raw: state.markdownRaw,
       top: ui.markdownStage.scrollTop,
@@ -729,6 +731,43 @@ async function showMarkdown(file, view, generation, fit) {
   }
 }
 
+/// `_review.json` is prose too, but it is already text — no renderer.
+async function showJson(file, view, generation, fit) {
+  await releaseDocument();
+  const raw = await invoke('read_json', { path: file.path });
+  if (state.generation !== generation) {
+    return;
+  }
+  ui.markdown.textContent = '';
+  ui.markdownRaw.textContent = raw;
+  setRaw(true, { persist: false });
+  setMarkdownScale(view?.scale || 1);
+  state.natural = {
+    width: MARKDOWN_WINDOW_WIDTH,
+    height: Math.max(ui.markdownStage.scrollHeight, 320),
+  };
+  if (view) {
+    ui.markdownStage.scrollTop = view.top;
+    ui.markdownStage.scrollLeft = view.left;
+    return;
+  }
+  ui.markdownStage.scrollTop = 0;
+  if (!fit) {
+    return;
+  }
+  const saved = rememberedSize(file.path);
+  if (saved) {
+    await fitWindow(saved[0], saved[1], false);
+  } else {
+    await fitWindow(
+      MARKDOWN_WINDOW_WIDTH,
+      state.natural.height + chromeHeight(),
+      true,
+      true,
+    );
+  }
+}
+
 // ── Fitting the window to the content ─────────────────────────────────────
 
 /// The size of what is on screen right now, in logical pixels. Read off the
@@ -745,12 +784,14 @@ function contentSize() {
     // wrong way round.
     return [Math.ceil(ui.imageBox.offsetWidth), Math.ceil(ui.imageBox.offsetHeight)];
   }
-  if (state.file?.kind === 'markdown') {
+  if (state.file?.kind === 'markdown' || state.file?.kind === 'json') {
     // The column as laid out, and the whole scroll height: prose has no page,
     // so wrapping it means a window the height of the document, up to the
     // screen.
+    const column =
+      state.file.kind === 'json' ? ui.markdownRaw : ui.markdown;
     return [
-      Math.ceil(ui.markdown.offsetWidth || MARKDOWN_WINDOW_WIDTH),
+      Math.ceil(column.offsetWidth || MARKDOWN_WINDOW_WIDTH),
       Math.ceil(ui.markdownStage.scrollHeight),
     ];
   }
@@ -1030,7 +1071,7 @@ async function openFile(
   if (!printPending) {
     clearPrintPages();
   }
-  const supported = ['pdf', 'image', 'markdown'].includes(file.kind);
+  const supported = ['pdf', 'image', 'markdown', 'json'].includes(file.kind);
   if (!supported) {
     // Nothing can show this, so nothing of the previous file should stay
     // behind it: the empty state comes back, not a stage with a stale PDF.
@@ -1045,6 +1086,7 @@ async function openFile(
       'kind-pdf',
       'kind-image',
       'kind-markdown',
+      'kind-json',
       'file-missing',
     );
     setTitle('');
@@ -1056,6 +1098,7 @@ async function openFile(
   document.body.classList.toggle('kind-pdf', file.kind === 'pdf');
   document.body.classList.toggle('kind-image', file.kind === 'image');
   document.body.classList.toggle('kind-markdown', file.kind === 'markdown');
+  document.body.classList.toggle('kind-json', file.kind === 'json');
   setTitle(file.name);
 
   // Free what the outgoing kind was holding: a decoded bitmap or a rendered
@@ -1063,7 +1106,7 @@ async function openFile(
   if (file.kind !== 'image') {
     ui.image.removeAttribute('src');
   }
-  if (file.kind !== 'markdown') {
+  if (file.kind !== 'markdown' && file.kind !== 'json') {
     ui.markdown.textContent = '';
     ui.markdownRaw.textContent = '';
   }
@@ -1076,6 +1119,8 @@ async function openFile(
       void loadSiblings(file);
     } else if (file.kind === 'markdown') {
       await showMarkdown(file, view, generation, !view && !keepWindow);
+    } else if (file.kind === 'json') {
+      await showJson(file, view, generation, !view && !keepWindow);
     }
     document.body.classList.remove('file-missing');
   } catch (error) {
@@ -1439,6 +1484,7 @@ async function closeAll() {
     'kind-pdf',
     'kind-image',
     'kind-markdown',
+    'kind-json',
     'file-missing',
   );
   setTitle('');
@@ -1446,7 +1492,7 @@ async function closeAll() {
   updateSiblingControls();
   renderTabs();
   closeFind();
-  ui.note.hidden = true;
+  ui.noteBox.hidden = true;
   ui.noteText.value = '';
   setStatus('');
 }
@@ -1498,7 +1544,7 @@ function removeCustomZoom() {
 function stepZoom(direction) {
   const kind = state.file?.kind;
   const image = kind === 'image';
-  const markdown = kind === 'markdown';
+  const markdown = kind === 'markdown' || kind === 'json';
   if (!image && !markdown && !state.document) {
     return;
   }
@@ -1527,7 +1573,7 @@ function stepZoom(direction) {
 /// is no page, so "fit page" is the scale that contains it and the other two
 /// fits are the CSS default, which fills the width and lets the height run.
 function applyZoomChoice(value) {
-  if (state.file?.kind === 'markdown') {
+  if (state.file?.kind === 'markdown' || state.file?.kind === 'json') {
     // Prose has no page to fit; every preset lands back at the natural size.
     const scale = Number(value);
     setMarkdownScale(Number.isFinite(scale) && scale > 0 ? scale : 1);
@@ -1910,128 +1956,90 @@ function basenameFromPath(path) {
   return match ? match[1] : path;
 }
 
-/// Describe the current selection: return { reference, text } or null.
+/// The last `[data-line]` at or before `node` in the rendered Markdown.
+function lineNear(node, root) {
+  if (!node || !root) {
+    return null;
+  }
+  const el = node.nodeType === 3 ? node.parentElement : node;
+  const anchor = el?.closest('[data-line]');
+  if (anchor && root.contains(anchor)) {
+    const line = Number(anchor.dataset.line);
+    return Number.isFinite(line) && line >= 1 ? line : null;
+  }
+  const walker = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT, (candidate) => {
+    if (!candidate.hasAttribute('data-line')) {
+      return NodeFilter.FILTER_SKIP;
+    }
+    if (candidate.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      return NodeFilter.FILTER_ACCEPT;
+    }
+    return NodeFilter.FILTER_SKIP;
+  });
+  let last = null;
+  let current;
+  while ((current = walker.nextNode())) {
+    last = current;
+  }
+  const line = last ? Number(last.dataset.line) : NaN;
+  return Number.isFinite(line) && line >= 1 ? line : null;
+}
+
+function pageNear(node) {
+  const el = node.nodeType === 3 ? node.parentElement : node;
+  const pageEl = el?.closest?.('.page');
+  const page = Number(pageEl?.dataset.pageNumber);
+  return Number.isFinite(page) && page >= 1 ? page : null;
+}
+
+/// `{ line }` / `{ page }`, plus `end` when the range is more than one.
+function atRange(start, end, key) {
+  if (start == null) {
+    return {};
+  }
+  const lo = end == null ? start : Math.min(start, end);
+  const hi = end == null ? start : Math.max(start, end);
+  return hi === lo ? { [key]: lo } : { [key]: lo, end: hi };
+}
+
+/// The current selection as a review record, or null.
 function describeSelection() {
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed) {
     return null;
   }
-  const text = selection.toString().trim();
-  if (!text) {
+  const quote = selection.toString().trim();
+  if (!quote) {
     return null;
   }
-
-  const basename = state.file ? basenameFromPath(state.file.path) : 'file';
-
+  const file = state.file ? basenameFromPath(state.file.path) : 'file';
   if (state.file?.kind === 'markdown') {
-    // For markdown, find the data-line anchors for start and end of selection.
-    let startLine = null;
-    let endLine = null;
-
-    const startNode = selection.anchorNode;
-    const endNode = selection.focusNode;
-
-    if (startNode && endNode) {
-      // Try closest first for each node
-      let el = startNode.nodeType === 3 ? startNode.parentElement : startNode;
-      let anchor = el?.closest('[data-line]');
-      if (anchor) {
-        startLine = Number(anchor.dataset.line);
-      } else {
-        // Use TreeWalker to find the last [data-line] before startNode
-        const walker = document.createNodeIterator(
-          ui.markdown,
-          NodeFilter.SHOW_ELEMENT,
-          (node) => {
-            if (!node.hasAttribute('data-line')) {
-              return NodeFilter.FILTER_SKIP;
-            }
-            if (node.compareDocumentPosition(startNode) & Node.DOCUMENT_POSITION_FOLLOWING) {
-              return NodeFilter.FILTER_ACCEPT;
-            }
-            return NodeFilter.FILTER_SKIP;
-          },
-        );
-        let node;
-        let lastAnchor = null;
-        while ((node = walker.nextNode())) {
-          lastAnchor = node;
-        }
-        if (lastAnchor) {
-          startLine = Number(lastAnchor.dataset.line);
-        }
-      }
-
-      el = endNode.nodeType === 3 ? endNode.parentElement : endNode;
-      anchor = el?.closest('[data-line]');
-      if (anchor) {
-        endLine = Number(anchor.dataset.line);
-      } else {
-        const walker = document.createNodeIterator(
-          ui.markdown,
-          NodeFilter.SHOW_ELEMENT,
-          (node) => {
-            if (!node.hasAttribute('data-line')) {
-              return NodeFilter.FILTER_SKIP;
-            }
-            if (node.compareDocumentPosition(endNode) & Node.DOCUMENT_POSITION_FOLLOWING) {
-              return NodeFilter.FILTER_ACCEPT;
-            }
-            return NodeFilter.FILTER_SKIP;
-          },
-        );
-        let node;
-        let lastAnchor = null;
-        while ((node = walker.nextNode())) {
-          lastAnchor = node;
-        }
-        if (lastAnchor) {
-          endLine = Number(lastAnchor.dataset.line);
-        }
-      }
-
-      // Determine the range
-      if (startLine !== null && endLine !== null) {
-        const minLine = Math.min(startLine, endLine);
-        const maxLine = Math.max(startLine, endLine);
-        const reference = minLine === maxLine ? `${basename}:${minLine}` : `${basename}:${minLine}-${maxLine}`;
-        return { reference, text };
-      }
-    }
-
-    // If no anchor found, just return the basename
-    return { reference: basename, text };
+    const start = lineNear(selection.anchorNode, ui.markdown);
+    const end = lineNear(selection.focusNode, ui.markdown);
+    return { file, kind: 'markdown', at: atRange(start, end, 'line'), quote };
   }
-
   if (state.file?.kind === 'pdf') {
-    // For PDF, find the page number from the start container.
-    const startContainer = selection.getRangeAt(0).startContainer;
-    const pageEl = startContainer.nodeType === 3
-      ? startContainer.parentElement?.closest('.page')
-      : startContainer.closest('.page');
-    const pageNum = pageEl?.dataset.pageNumber;
-
-    if (pageNum) {
-      const endContainer = selection.getRangeAt(selection.rangeCount - 1).endContainer;
-      const endPageEl = endContainer.nodeType === 3
-        ? endContainer.parentElement?.closest('.page')
-        : endContainer.closest('.page');
-      const endPageNum = endPageEl?.dataset.pageNumber;
-
-      if (endPageNum && endPageNum !== pageNum) {
-        const reference = `${basename} p.${pageNum}-${endPageNum}`;
-        return { reference, text };
-      }
-
-      const reference = `${basename} p.${pageNum}`;
-      return { reference, text };
-    }
-
-    return { reference: basename, text };
+    const start = pageNear(selection.getRangeAt(0).startContainer);
+    const end = pageNear(selection.getRangeAt(selection.rangeCount - 1).endContainer);
+    return { file, kind: 'pdf', at: atRange(start, end, 'page'), quote };
   }
-
-  // Image: return null
   return null;
+}
+
+/// Human form of a record: `collab.md:12-18` or `paper.pdf p.7`.
+function formatSelection(record) {
+  if (!record) {
+    return '';
+  }
+  if (record.kind === 'markdown' && record.at?.line) {
+    const end = record.at.end && record.at.end !== record.at.line ? `-${record.at.end}` : '';
+    return `${record.file}:${record.at.line}${end}`;
+  }
+  if (record.kind === 'pdf' && record.at?.page) {
+    const end = record.at.end && record.at.end !== record.at.page ? `-${record.at.end}` : '';
+    return `${record.file} p.${record.at.page}${end}`;
+  }
+  return record.file;
 }
 
 /// Normalise text for clipboard: collapse spaces, collapse long newlines, cap at 20k, format as quote.
@@ -2049,43 +2057,60 @@ function normaliseText(text) {
   return normalized;
 }
 
-/// Copy the selection with its source reference to clipboard.
+function hasLocator(record) {
+  return Boolean(record.at?.line || record.at?.page);
+}
+
 function openNoteBox() {
   const picked = describeSelection();
   if (!picked) {
     setStatus('Select some text first');
     return;
   }
+  if (!hasLocator(picked)) {
+    setStatus(
+      picked.kind === 'pdf'
+        ? 'Select text on a page'
+        : 'Select text on a source line',
+    );
+    return;
+  }
 
   state.pendingNote = picked;
-  ui.note.hidden = false;
-  ui.noteRef.textContent = picked.reference;
+  ui.noteBox.hidden = false;
+  ui.noteRef.textContent = formatSelection(picked);
   ui.noteText.focus();
 }
 
 async function saveNote() {
-  if (!state.pendingNote) {
+  if (!state.pendingNote || !state.file) {
     return;
   }
 
   const comment = ui.noteText.value.trim();
+  const review = {
+    file: state.pendingNote.file,
+    kind: state.pendingNote.kind,
+    at: state.pendingNote.at,
+    quote: state.pendingNote.quote,
+    comment,
+  };
 
   try {
-    const notesPath = await invoke('append_note', {
+    const reviewPath = await invoke('append_review', {
       document: state.file.path,
-      reference: state.pendingNote.reference,
-      quote: state.pendingNote.text,
-      comment,
+      review,
     });
-    setStatus(`Note saved to ${basenameFromPath(notesPath)}`);
-    state.notesPath = notesPath;
-    ui.note.hidden = true;
+    setStatus(`Review saved to ${basenameFromPath(reviewPath)}`);
+    state.reviewPath = reviewPath;
+    ui.noteBox.hidden = true;
     ui.noteText.value = '';
   } catch (error) {
     setStatus(String(error), { error: true });
   }
 }
 
+/// Ask is a projection of the same record: a markdown quote for a session.
 async function askSelection() {
   const picked = describeSelection();
   if (!picked) {
@@ -2093,11 +2118,10 @@ async function askSelection() {
     return;
   }
 
-  const { reference, text } = picked;
-  const normalized = normaliseText(text);
+  const normalized = normaliseText(picked.quote);
   const lines = normalized.split('\n');
   const quoted = lines.map((line) => `> ${line}`).join('\n');
-  const payload = `${reference}\n${quoted}\n`;
+  const payload = `${formatSelection(picked)}\n${quoted}\n`;
 
   try {
     await navigator.clipboard.writeText(payload);
@@ -2106,6 +2130,32 @@ async function askSelection() {
     setStatus(`Copied ${lineCount} line${s} for the session`);
   } catch {
     setStatus('Clipboard refused the text', { error: true });
+  }
+}
+
+function sidecarPath(docPath) {
+  const cut = Math.max(docPath.lastIndexOf('/'), docPath.lastIndexOf('\\'));
+  const dir = cut >= 0 ? docPath.slice(0, cut + 1) : '';
+  return `${dir}_review.json`;
+}
+
+async function openReviews() {
+  if (!state.file) {
+    setStatus('No file open');
+    return;
+  }
+  if (state.file.kind === 'json') {
+    return;
+  }
+  const path = sidecarPath(state.file.path);
+  try {
+    const file = await invoke('open_path', { path });
+    await openInTab(file);
+  } catch (error) {
+    const message = String(error);
+    setStatus(/does not exist/i.test(message) ? 'No reviews yet' : message, {
+      error: true,
+    });
   }
 }
 // ── Wiring ────────────────────────────────────────────────────────────────
@@ -2269,20 +2319,7 @@ ui.wrap.addEventListener('click', toggleWrap);
 ui.raw.addEventListener('click', () => setRaw(!state.markdownRaw));
 ui.ask.addEventListener('click', () => void askSelection());
 ui.note.addEventListener('click', () => void openNoteBox());
-ui.notes.addEventListener('click', () => {
-  if (!state.file) {
-    setStatus('No file open');
-    return;
-  }
-  // Compute sidecar path: same directory, <stem>.notes.md
-  const path = state.file.path;
-  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-  const dir = path.slice(0, cut + 1);
-  const file = path.slice(cut + 1);
-  const stem = file.split('.').slice(0, -1).join('.');
-  const notesPath = dir + stem + '.notes.md';
-  void openPath(notesPath);
-});
+ui.notes.addEventListener('click', () => void openReviews());
 
 // A link in a markdown file must not leave the page. A relative one —
 // `[notes](other.md)` — resolves against the app origin, which the navigation
@@ -2429,7 +2466,7 @@ ui.noteText.addEventListener('keydown', (event) => {
     void saveNote();
   } else if (event.key === 'Escape') {
     event.preventDefault();
-    ui.note.hidden = true;
+    ui.noteBox.hidden = true;
     ui.noteText.value = '';
   }
 });
@@ -2586,7 +2623,7 @@ window.addEventListener('keydown', (event) => {
     return;
   }
   // The same reading keys work on a markdown column as on a PDF.
-  if (state.file?.kind === 'markdown') {
+  if (state.file?.kind === 'markdown' || state.file?.kind === 'json') {
     switch (key) {
       case 'j':
         ui.markdownStage.scrollBy({ top: 90 });
@@ -2909,7 +2946,9 @@ async function reportSmoke() {
     const shown = await settles(() =>
       file.kind === 'image'
         ? ui.image.naturalWidth > 0
-        : (ui.markdown?.textContent || '').trim().length > 0,
+        : file.kind === 'json'
+          ? (ui.markdownRaw?.textContent || '').trim().length > 0
+          : (ui.markdown?.textContent || '').trim().length > 0,
     );
     await invoke('smoke_report', {
       ok: shown,

@@ -68,8 +68,7 @@ that survives a build deleting and recreating the file mid-compile.
   in Latin Modern — no JavaScript math engine, nothing fetched, and the MathML meets the same
   sanitizer as the prose.
 - **Markdown typography:** Rendered text is set in Latin Modern Roman at 17 px on a 38 em measure, hyphenated with `text-wrap: pretty` for natural word breaks. Zoom reflows the text rather than scaling it.
-- **Ask** (`Ctrl+Shift+A`): Copy a selection as a Markdown quote headed by its source: `collab.md:12-18` for Markdown, `paper.pdf p.7` for PDFs. Paste into an AI chat to refine the text; line numbers let you edit exactly that part and see the live reload. Capped at 20,000 characters; not available for images.
-- **Notes** (`Ctrl+Shift+N`): Select text, press the key, type a comment. It appends to `<stem>.notes.md` next to the file as a `## reference` heading, the quoted text, and your comment. A "notes" button opens that file as a tab; it reloads as you add notes. The app writes only that one file and refuses to write notes about a notes file.
+- **Ask and notes, one record.** Select text in Markdown or a PDF — the locator is the only difference (`at.line` vs `at.page`). `Ctrl+Shift+A` copies that record as a Markdown quote headed by `collab.md:12-18` or `paper.pdf p.7`, for a session. `Ctrl+Shift+N` adds a comment and appends the same record to `_review.json` next to the file — one sidecar, both kinds, append-only. A toolbar button opens it. The app writes only that file, only for a document you have open, and will not review `_review.json` itself. Capped at 20,000 characters of quote; not available for images.
 - **Changed blocks light up on reload:** When a Markdown file rewrites, changed and new paragraphs, headings, list items, tables and equations fade from a highlight over a few seconds. The comparison is by content: adding a paragraph marks only that one. Scroll position is kept.
 - **Links go where you would expect.** A `#heading` or footnote scrolls; a web link opens in
   your browser; a relative link — `[notes](other.md)`, `[fig](fig1.png)`, the paper it
@@ -96,7 +95,7 @@ that survives a build deleting and recreating the file mid-compile.
   sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
   same size follows the first one, as it does in every other viewer. If the machine has nothing
   to print to — no printer, or a stopped print service — it says so rather than opening nothing.
-- **The title says which build you are running** — `paper.pdf — pdf-next 0.9.3` — so a bug report
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.10.0` — so a bug report
   can name a version without hunting for an about box.
 - **Tells you when there is a newer version.** A few seconds after launch the app asks
   GitHub for the latest release, once; if it is newer, the last toolbar button lights up and a

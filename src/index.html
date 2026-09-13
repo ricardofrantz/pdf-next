@@ -151,13 +151,13 @@
         <button id="raw" type="button" class="md-only" title="Show the raw markdown (Ctrl+U)" aria-label="Show the raw markdown" aria-pressed="false">
           <svg class="icon"><use href="#i-raw"/></svg>
         </button>
-        <button id="ask" type="button" class="not-image" title="Copy the selection with its source lines for an AI session (Ctrl+Shift+A)" aria-label="Copy selection for a session">
+        <button id="ask" type="button" class="not-image" title="Copy the selection as a review quote (Ctrl+Shift+A)" aria-label="Copy selection for a session">
           <svg class="icon"><use href="#i-ask"/></svg>
         </button>
-        <button id="note" type="button" class="not-image" title="Add a note about the selection (Ctrl+Shift+N)" aria-label="Add a note about the selection">
+        <button id="note" type="button" class="not-image" title="Add a review of the selection (Ctrl+Shift+N)" aria-label="Add a review of the selection">
           <svg class="icon"><use href="#i-ask"/></svg>
         </button>
-        <button id="notes" type="button" class="not-image" title="Open the notes file" aria-label="Open the notes file">
+        <button id="notes" type="button" class="not-image" title="Open _review.json" aria-label="Open _review.json">
           <svg class="icon"><use href="#i-ask"/></svg>
         </button>
         <button id="print" type="button" title="Print (Ctrl+P)" aria-label="Print">
@@ -234,7 +234,7 @@
         </button>
       </div>
 
-      <div id="note" hidden>
+      <div id="noteBox" hidden>
         <div id="noteRef"></div>
         <input id="noteText" type="text" placeholder="Comment (Enter to save, Esc to cancel)" />
         <button id="noteSave" type="button">Save</button>
