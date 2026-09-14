@@ -4,6 +4,12 @@
 import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
 import { findNormalizedSpan, reviewLabel } from '../src/review-label.mjs';
+import {
+  REVIEW_SIZE_DEFAULT,
+  REVIEW_SIZE_STEPS,
+  nearestReviewSize,
+  nextReviewSize,
+} from '../src/review-size.mjs';
 
 const app = await readFile('src/app.mjs', 'utf8');
 const main = await readFile('src-tauri/src/main.rs', 'utf8');
@@ -132,6 +138,21 @@ assert.match(
   main,
   /fn set_poll_seconds\(seconds: u64\)[\s\S]*?POLL_SECONDS\.store/,
   'The poll cadence must be settable, including 0 for off.',
+);
+assert.match(
+  main,
+  /fn watch_review_sidecar\([\s\S]*?"reviews-changed"/,
+  'The same poll tick must follow {stem}_review.json and emit reviews-changed, not file-changed.',
+);
+assert.match(
+  main,
+  /fn sidecar_ready\(path: &Path\)[\s\S]*?parse_store/,
+  'A half-written sidecar must wait for the next tick.',
+);
+assert.match(
+  main,
+  /fn note_sidecar_written\([\s\S]*?state\.sidecar_modified/,
+  'A save from the app must not look like an incoming sidecar edit.',
 );
 assert.match(
   app,
@@ -766,7 +787,59 @@ assert.match(
   /invoke\('append_review', \{\s*document: state\.file\.path,\s*review,/,
   'A new review must append a record, not a markdown block.',
 );
+assert.match(
+  app,
+  /listen\('reviews-changed'[\s\S]*?reloadReviewsFromDisk\(\)/,
+  'An external sidecar edit must refresh reviews without reloading the document.',
+);
+assert.match(
+  app,
+  /const COMMENT_SAVE_MS = 400/,
+  'A panel comment must write the sidecar as you type.',
+);
+assert.match(
+  app,
+  /!typing &&\s*event\.key === 'Enter'[\s\S]*?reviewFromSelection\(\)[\s\S]*?openNoteBox\(\)/,
+  'Enter on a selection must open the comment box.',
+);
+assert.match(
+  app,
+  /event\.target instanceof HTMLTextAreaElement/,
+  'A comment textarea must count as typing, so Enter there is a newline.',
+);
+assert.doesNotMatch(
+  app,
+  /save\.textContent = 'Save'/,
+  'Panel comments write themselves; there is no extra Save click.',
+);
 assert.match(page, /id="reviewPane"/, 'The Review panel lives on the right of the stage.');
+assert.match(page, /id="reviewSizeDown"/, 'The Review panel has a smaller-text control.');
+assert.match(page, /id="reviewSizeUp"/, 'The Review panel has a larger-text control.');
+assert.match(
+  app,
+  /from '\.\/review-size\.mjs'/,
+  'Review text size comes from the shared size helper.',
+);
+assert.match(
+  styles,
+  /#reviewList \{[\s\S]*?font-size: var\(--review-size/,
+  'Review quotes and comments follow the pane size, not a hard-coded 12px.',
+);
+{
+  assert.deepEqual(REVIEW_SIZE_STEPS, [10, 11, 12, 13, 15, 17, 20]);
+  assert.equal(REVIEW_SIZE_DEFAULT, 12);
+  assert.equal(nearestReviewSize(12), 12);
+  assert.equal(nearestReviewSize(14), 13);
+  assert.equal(nearestReviewSize(16), 15);
+  assert.equal(nearestReviewSize(0), 12);
+  assert.equal(nearestReviewSize('nope'), 12);
+  assert.equal(nextReviewSize(12, 1), 13);
+  assert.equal(nextReviewSize(12, -1), 11);
+  assert.equal(nextReviewSize(10, -1), 10);
+  assert.equal(nextReviewSize(20, 1), 20);
+  assert.equal(nextReviewSize(11, 1), 12);
+  assert.equal(nextReviewSize(17, 1), 20);
+}
 assert.match(page, /id="reviewChip"/, 'A chip after a short hold adds a review.');
 assert.match(page, /id="copyPath"/, 'The toolbar copies the full path after zoom.');
 assert.match(page, /id="copyName"/, 'The toolbar copies the file name after zoom.');

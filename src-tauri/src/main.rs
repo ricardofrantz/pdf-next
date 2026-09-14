@@ -33,6 +33,13 @@ struct WatchState {
     modified: Option<SystemTime>,
     len: u64,
     missing: bool,
+    /// `{stem}_review.json` next to the watched document. The same poll
+    /// cadence follows it, so an editor save shows up in the Review panel
+    /// without reloading the PDF. `sidecar_missing` starts true: no sidecar
+    /// is the usual case, not a deletion to report.
+    sidecar_modified: Option<SystemTime>,
+    sidecar_len: u64,
+    sidecar_missing: bool,
     /// Every file the reader has opened this session, canonicalized. The doc
     /// protocol and the markdown renderer serve members of this set and
     /// nothing else; `adopt` is the only way in, and it takes supported kinds
@@ -287,12 +294,17 @@ fn adopt(watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
     }
     let canonical = std::fs::canonicalize(&path).unwrap_or(path);
     let (modified, len) = stat(&canonical).unwrap_or((None, 0));
+    let sidecar = review_sidecar(&canonical);
+    let (sidecar_modified, sidecar_len) = stat(&sidecar).unwrap_or((None, 0));
 
     let mut state = watched.0.lock().map_err(|error| error.to_string())?;
     state.path = Some(canonical.clone());
     state.modified = modified;
     state.len = len;
     state.missing = false;
+    state.sidecar_modified = sidecar_modified;
+    state.sidecar_len = sidecar_len;
+    state.sidecar_missing = !sidecar.exists();
     state.allowed.insert(canonical.clone());
     drop(state);
 
@@ -1171,6 +1183,112 @@ fn wait_for_tick() {
     }
 }
 
+/// A sidecar the editor is still writing is left for the next tick, the same
+/// way a half-written PDF is. Empty text is a valid store; truncated JSON is
+/// not.
+fn sidecar_ready(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .is_some_and(|text| parse_store(&text).is_ok())
+}
+
+/// Record the sidecar's current stat so our own write is not seen as an
+/// incoming edit on the next poll.
+fn note_sidecar_written(watched: &Watched, document: &str) {
+    let Ok(doc) = std::fs::canonicalize(PathBuf::from(document)) else {
+        return;
+    };
+    let sidecar = review_sidecar(&doc);
+    let Ok(mut state) = watched.0.lock() else {
+        return;
+    };
+    if state.path.as_deref() != Some(doc.as_path()) {
+        return;
+    }
+    match stat(&sidecar) {
+        Some((modified, len)) => {
+            state.sidecar_modified = modified;
+            state.sidecar_len = len;
+            state.sidecar_missing = false;
+        }
+        None => {
+            state.sidecar_modified = None;
+            state.sidecar_len = 0;
+            state.sidecar_missing = true;
+        }
+    }
+}
+
+/// The poll toggle follows `{stem}_review.json` as well as the document.
+/// A change here only reloads the Review panel — not the PDF.
+fn watch_review_sidecar(
+    app: &AppHandle,
+    watched: &Watched,
+    doc: &Path,
+    recorded_modified: Option<SystemTime>,
+    recorded_len: u64,
+    recorded_missing: bool,
+) {
+    let kind = kind_for(doc);
+    if kind != "markdown" && kind != "pdf" {
+        return;
+    }
+    let sidecar = review_sidecar(doc);
+    match stat(&sidecar) {
+        Some((modified, len)) => {
+            let changed = modified != recorded_modified || len != recorded_len;
+            let reappeared = recorded_missing;
+            if !(changed || reappeared) {
+                return;
+            }
+            if !sidecar_ready(&sidecar) {
+                return;
+            }
+            {
+                let Ok(mut state) = watched.0.lock() else {
+                    return;
+                };
+                if state.path.as_deref() != Some(doc) {
+                    return;
+                }
+                state.sidecar_modified = modified;
+                state.sidecar_len = len;
+                state.sidecar_missing = false;
+            }
+            let _ = app.emit(
+                "reviews-changed",
+                WatchEvent {
+                    kind: if reappeared { "restored" } else { "changed" },
+                    revision: REVISION.load(Ordering::Relaxed),
+                },
+            );
+        }
+        None => {
+            if recorded_missing {
+                return;
+            }
+            {
+                let Ok(mut state) = watched.0.lock() else {
+                    return;
+                };
+                if state.path.as_deref() != Some(doc) {
+                    return;
+                }
+                state.sidecar_modified = None;
+                state.sidecar_len = 0;
+                state.sidecar_missing = true;
+            }
+            let _ = app.emit(
+                "reviews-changed",
+                WatchEvent {
+                    kind: "missing",
+                    revision: REVISION.load(Ordering::Relaxed),
+                },
+            );
+        }
+    }
+}
+
 /// One `stat` per second. Cheap enough to be invisible, fast enough that a
 /// recompile shows up before you look back at the window.
 ///
@@ -1188,14 +1306,39 @@ fn spawn_watcher(app: AppHandle) {
             let Ok(state) = watched.0.lock() else {
                 continue;
             };
-            state
-                .path
-                .clone()
-                .map(|path| (path, state.modified, state.len, state.missing))
+            state.path.clone().map(|path| {
+                (
+                    path,
+                    state.modified,
+                    state.len,
+                    state.missing,
+                    state.sidecar_modified,
+                    state.sidecar_len,
+                    state.sidecar_missing,
+                )
+            })
         };
-        let Some((path, recorded_modified, recorded_len, missing)) = snapshot else {
+        let Some((
+            path,
+            recorded_modified,
+            recorded_len,
+            missing,
+            sidecar_modified,
+            sidecar_len,
+            sidecar_missing,
+        )) = snapshot
+        else {
             continue;
         };
+
+        watch_review_sidecar(
+            &app,
+            &watched,
+            &path,
+            sidecar_modified,
+            sidecar_len,
+            sidecar_missing,
+        );
 
         match stat(&path) {
             Some((modified, len)) => {
@@ -1597,7 +1740,9 @@ fn append_review(
     review: Review,
     watched: State<'_, Watched>,
 ) -> Result<ReviewFile, String> {
-    write_review(&document, review, &allowed_set(&watched)?)
+    let store = write_review(&document, review, &allowed_set(&watched)?)?;
+    note_sidecar_written(&watched, &document);
+    Ok(store)
 }
 
 #[tauri::command]
@@ -1612,7 +1757,9 @@ fn update_review(
     comment: String,
     watched: State<'_, Watched>,
 ) -> Result<ReviewFile, String> {
-    change_review_comment(&document, &id, &comment, &allowed_set(&watched)?)
+    let store = change_review_comment(&document, &id, &comment, &allowed_set(&watched)?)?;
+    note_sidecar_written(&watched, &document);
+    Ok(store)
 }
 
 #[tauri::command]
@@ -1621,7 +1768,9 @@ fn delete_review(
     id: String,
     watched: State<'_, Watched>,
 ) -> Result<ReviewFile, String> {
-    remove_review(&document, &id, &allowed_set(&watched)?)
+    let store = remove_review(&document, &id, &allowed_set(&watched)?)?;
+    note_sidecar_written(&watched, &document);
+    Ok(store)
 }
 
 /// Open a link from a markdown file in the default browser.
@@ -2333,7 +2482,8 @@ fn main() {
 mod tests {
     use super::{
         change_review_comment, list_reviews, natural_key, open_download, open_link, parse_cli,
-        remove_review, render_markdown, write_review, Cli, Review, ReviewAt, Target,
+        parse_store, remove_review, render_markdown, sidecar_ready, write_review, Cli, Review,
+        ReviewAt, Target,
     };
     use std::collections::HashSet;
     use std::ffi::OsString;
@@ -2978,6 +3128,19 @@ mod tests {
         let left = remove_review(&path, "r1", &allowed).unwrap();
         assert_eq!(left.reviews.len(), 1);
         assert_eq!(left.reviews[0].id, "r2");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidecar_ready_rejects_truncated_json() {
+        let dir = scratch("sidecar_trunc");
+        let path = dir.join("paper_review.json");
+        std::fs::write(&path, "{\"format\":2,\"reviews\":[").unwrap();
+        assert!(!sidecar_ready(&path));
+        std::fs::write(&path, "{\"format\":2,\"reviews\":[]}\n").unwrap();
+        assert!(sidecar_ready(&path));
+        assert!(parse_store("{\"format\":2,\"reviews\":[").is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

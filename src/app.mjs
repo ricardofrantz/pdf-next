@@ -2,6 +2,12 @@
 // showing the newest version of it.
 import { bootIsFine, failures, mark } from './smoke.mjs';
 import { findNormalizedSpan, reviewIdNum, reviewLabel } from './review-label.mjs';
+import {
+  REVIEW_SIZE_DEFAULT,
+  REVIEW_SIZE_STEPS,
+  nearestReviewSize,
+  nextReviewSize,
+} from './review-size.mjs';
 import * as pdfjsLib from './vendor/pdfjs/build/pdf.min.mjs';
 
 // pdf_viewer.mjs resolves the core library through this global. Never assign
@@ -98,6 +104,8 @@ const ui = {
   noteSave: el('noteSave'),
   reviewPane: el('reviewPane'),
   reviewList: el('reviewList'),
+  reviewSizeDown: el('reviewSizeDown'),
+  reviewSizeUp: el('reviewSizeUp'),
   reviewChip: el('reviewChip'),
   reviewMenu: el('reviewMenu'),
   reviewMenuAdd: el('reviewMenuAdd'),
@@ -125,6 +133,7 @@ const state = {
   platform: '',
   update: null,
   pendingRevision: null,
+  pendingReviews: false,
   generation: 0,
   siblings: [],
   siblingIndex: -1,
@@ -140,6 +149,7 @@ const state = {
   selectedReviewId: null,
   reviewOpen: false,
   reviewGrown: false,
+  reviewSize: REVIEW_SIZE_DEFAULT,
 };
 
 // One worker for the life of the process. getDocument would otherwise spawn a
@@ -652,6 +662,7 @@ const MARKDOWN_WINDOW_WIDTH = 780;
 const REVIEW_PANE_WIDTH = 280;
 const REVIEW_TINTS = 6;
 const REVIEW_CHIP_MS = 500;
+const COMMENT_SAVE_MS = 400;
 
 /// Rendered or raw. Both nodes stay in the DOM with the same content, so the
 /// toggle is a visibility flip — no re-render, no IPC round trip.
@@ -1076,6 +1087,7 @@ async function openFile(
   file,
   { preserveView = false, keepWindow = false, view: given = null } = {},
 ) {
+  await flushCommentSave();
   // Rebuilds can outpace loading; only the newest one may touch the UI.
   const generation = ++state.generation;
   const view = given || (preserveView ? captureView() : null);
@@ -2212,20 +2224,86 @@ async function askSelection() {
   }
 }
 
-function applyReviewStore(store) {
-  state.reviews = Array.isArray(store?.reviews) ? store.reviews : [];
-  renderReviewList();
-  paintReviewMarks();
+function reviewListSignature(reviews) {
+  return reviews.map((review) => review.id).join('\n');
 }
 
-async function loadReviews() {
+function reviewPaintSignature(reviews) {
+  return reviews
+    .map((review) => `${review.id}\t${review.kind}\t${JSON.stringify(review.at)}\t${review.quote}`)
+    .join('\n');
+}
+
+function reviewRowById(id) {
+  for (const row of ui.reviewList.querySelectorAll('.review-row')) {
+    if (row.dataset.reviewId === id) {
+      return row;
+    }
+  }
+  return null;
+}
+
+function editingReviewComment() {
+  const el = document.activeElement;
+  if (!(el instanceof HTMLTextAreaElement) || !el.classList.contains('review-comment')) {
+    return null;
+  }
+  const id = el.closest('.review-row')?.dataset.reviewId;
+  return id ? { id, value: el.value } : null;
+}
+
+function applyReviewStore(store, { keepEdit = false } = {}) {
+  const reviews = Array.isArray(store?.reviews) ? store.reviews : [];
+  const editing = keepEdit ? editingReviewComment() : null;
+  const sameList =
+    reviewListSignature(reviews) === reviewListSignature(state.reviews) &&
+    ui.reviewList.querySelector('.review-row');
+  const samePaint = reviewPaintSignature(reviews) === reviewPaintSignature(state.reviews);
+  state.reviews = reviews;
+
+  if (sameList) {
+    for (const review of reviews) {
+      const row = reviewRowById(review.id);
+      if (!row) {
+        continue;
+      }
+      const quote = row.querySelector('.review-quote');
+      if (quote) {
+        quote.textContent = review.quote;
+      }
+      const comment = row.querySelector('.review-comment');
+      if (comment instanceof HTMLTextAreaElement && editing?.id !== review.id) {
+        comment.value = review.comment || '';
+      }
+    }
+  } else {
+    renderReviewList();
+    if (editing) {
+      const comment = reviewRowById(editing.id)?.querySelector('.review-comment');
+      if (comment instanceof HTMLTextAreaElement) {
+        comment.value = editing.value;
+        comment.focus({ preventScroll: true });
+      }
+    }
+  }
+  if (!samePaint) {
+    paintReviewMarks();
+  }
+}
+
+async function loadReviews({ fromDisk = false } = {}) {
   if (!state.file || (state.file.kind !== 'markdown' && state.file.kind !== 'pdf')) {
     applyReviewStore({ reviews: [] });
     return;
   }
   try {
-    applyReviewStore(await invoke('read_reviews', { document: state.file.path }));
+    applyReviewStore(await invoke('read_reviews', { document: state.file.path }), {
+      keepEdit: fromDisk,
+    });
   } catch (error) {
+    if (fromDisk && state.reviews.length) {
+      return;
+    }
     applyReviewStore({ reviews: [] });
     if (!/never opened|does not exist/i.test(String(error))) {
       setStatus(String(error), { error: true });
@@ -2233,12 +2311,17 @@ async function loadReviews() {
   }
 }
 
+async function reloadReviewsFromDisk() {
+  await flushCommentSave();
+  await loadReviews({ fromDisk: true });
+}
+
 function renderReviewList() {
   ui.reviewList.textContent = '';
   if (!state.reviews.length) {
     const empty = document.createElement('p');
     empty.className = 'review-empty';
-    empty.textContent = 'No reviews yet — select text and press Ctrl+Shift+N.';
+    empty.textContent = 'No reviews yet — select text and press Enter.';
     ui.reviewList.append(empty);
     return;
   }
@@ -2266,17 +2349,14 @@ function renderReviewList() {
     comment.rows = 2;
     comment.value = review.comment || '';
     comment.addEventListener('click', (event) => event.stopPropagation());
+    comment.addEventListener('input', () => scheduleCommentSave(review.id, comment.value));
+    comment.addEventListener('blur', () => {
+      void flushCommentSave();
+    });
     row.append(comment);
 
     const actions = document.createElement('div');
     actions.className = 'review-actions';
-    const save = document.createElement('button');
-    save.type = 'button';
-    save.textContent = 'Save';
-    save.addEventListener('click', (event) => {
-      event.stopPropagation();
-      void updateReviewComment(review.id, comment.value);
-    });
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.textContent = 'Delete';
@@ -2284,7 +2364,7 @@ function renderReviewList() {
       event.stopPropagation();
       void deleteReview(review.id);
     });
-    actions.append(save, remove);
+    actions.append(remove);
     row.append(actions);
 
     row.addEventListener('click', () => {
@@ -2333,22 +2413,76 @@ function toggleReviewPanel() {
   void setReviewOpen(!state.reviewOpen);
 }
 
-async function updateReviewComment(id, comment) {
+function setReviewSize(px, { persist = true } = {}) {
+  const size = nearestReviewSize(px);
+  state.reviewSize = size;
+  document.documentElement.style.setProperty('--review-size', `${size}px`);
+  const first = REVIEW_SIZE_STEPS[0];
+  const last = REVIEW_SIZE_STEPS[REVIEW_SIZE_STEPS.length - 1];
+  ui.reviewSizeDown.disabled = size <= first;
+  ui.reviewSizeUp.disabled = size >= last;
+  if (persist) {
+    try {
+      localStorage.setItem('pdf-next.review-size', String(size));
+    } catch {
+      // Preference only.
+    }
+  }
+}
+
+function stepReviewSize(delta) {
+  setReviewSize(nextReviewSize(state.reviewSize, delta));
+}
+
+let commentSaveTimer = 0;
+let pendingComment = null;
+
+function scheduleCommentSave(id, comment) {
+  pendingComment = { id, comment };
+  window.clearTimeout(commentSaveTimer);
+  commentSaveTimer = window.setTimeout(() => {
+    void flushCommentSave();
+  }, COMMENT_SAVE_MS);
+}
+
+async function flushCommentSave() {
+  window.clearTimeout(commentSaveTimer);
+  commentSaveTimer = 0;
+  const pending = pendingComment;
+  pendingComment = null;
+  if (!pending || !state.file) {
+    return;
+  }
+  const current = state.reviews.find((review) => review.id === pending.id);
+  if (current && (current.comment || '') === pending.comment.trim()) {
+    return;
+  }
+  await updateReviewComment(pending.id, pending.comment, { quiet: true });
+}
+
+async function updateReviewComment(id, comment, { quiet = false } = {}) {
   if (!state.file) {
     return;
   }
   try {
-    applyReviewStore(
-      await invoke('update_review', { document: state.file.path, id, comment }),
-    );
-    selectReview(id);
-    setStatus('Review updated');
+    const store = await invoke('update_review', { document: state.file.path, id, comment });
+    const reviews = Array.isArray(store?.reviews) ? store.reviews : [];
+    state.reviews = reviews;
+    if (!quiet) {
+      selectReview(id);
+      setStatus('Review updated');
+    }
   } catch (error) {
     setStatus(String(error), { error: true });
   }
 }
 
 async function deleteReview(id) {
+  if (pendingComment?.id === id) {
+    pendingComment = null;
+    window.clearTimeout(commentSaveTimer);
+    commentSaveTimer = 0;
+  }
   if (!state.file) {
     return;
   }
@@ -2873,6 +3007,8 @@ ui.raw.addEventListener('click', () => setRaw(!state.markdownRaw));
 ui.ask.addEventListener('click', () => void askSelection());
 ui.note.addEventListener('click', () => void openNoteBox());
 ui.notes.addEventListener('click', () => toggleReviewPanel());
+ui.reviewSizeDown.addEventListener('click', () => stepReviewSize(-1));
+ui.reviewSizeUp.addEventListener('click', () => stepReviewSize(1));
 ui.reviewChip.addEventListener('pointerdown', (event) => {
   event.preventDefault();
 });
@@ -3095,6 +3231,7 @@ eventBus.on('updatefindcontrolstate', ({ matchesCount, state: findState }) => {
 window.addEventListener('keydown', (event) => {
   const typing =
     event.target instanceof HTMLInputElement ||
+    event.target instanceof HTMLTextAreaElement ||
     event.target instanceof HTMLSelectElement;
   const key = event.key.toLowerCase();
 
@@ -3135,6 +3272,20 @@ window.addEventListener('keydown', (event) => {
       void openNoteBox();
       return;
     }
+  }
+  if (
+    !typing &&
+    event.key === 'Enter' &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    !event.shiftKey &&
+    ui.noteBox.hidden &&
+    reviewFromSelection()
+  ) {
+    event.preventDefault();
+    openNoteBox();
+    return;
   }
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && key === 'r') {
     event.preventDefault();
@@ -3321,6 +3472,17 @@ const openFilesReady = listen('open-files', (event) =>
 );
 
 // The watcher fires at most once a second, and only when something moved.
+listen('reviews-changed', async () => {
+  if (!state.file) {
+    return;
+  }
+  if (document.visibilityState === 'hidden') {
+    state.pendingReviews = true;
+    return;
+  }
+  await reloadReviewsFromDisk();
+});
+
 listen('file-changed', async (event) => {
   const { kind, revision } = event.payload || {};
   if (!state.file) {
@@ -3357,13 +3519,18 @@ document.addEventListener('visibilitychange', async () => {
     }
     return;
   }
-  if (state.pendingRevision === null) {
+  if (state.pendingRevision !== null) {
+    const revision = state.pendingRevision;
+    state.pendingRevision = null;
+    state.pendingReviews = false;
+    if (state.file) {
+      await openFile({ ...state.file, revision }, { preserveView: true });
+    }
     return;
   }
-  const revision = state.pendingRevision;
-  state.pendingRevision = null;
-  if (state.file) {
-    await openFile({ ...state.file, revision }, { preserveView: true });
+  if (state.pendingReviews) {
+    state.pendingReviews = false;
+    await reloadReviewsFromDisk();
   }
 });
 
@@ -3408,6 +3575,15 @@ try {
   await invoke('set_poll_seconds', { seconds });
 } catch {
   ui.poll.value = '1';
+}
+
+try {
+  const saved = Number(localStorage.getItem('pdf-next.review-size'));
+  setReviewSize(REVIEW_SIZE_STEPS.includes(saved) ? saved : REVIEW_SIZE_DEFAULT, {
+    persist: false,
+  });
+} catch {
+  setReviewSize(REVIEW_SIZE_DEFAULT, { persist: false });
 }
 
 // Command-line flags style this launch without changing saved preferences.
