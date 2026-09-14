@@ -1,7 +1,7 @@
 // pdf-next viewer. One file, one window, one job: show the document and keep
 // showing the newest version of it.
 import { bootIsFine, failures, mark } from './smoke.mjs';
-import { reviewIdNum, reviewLabel } from './review-label.mjs';
+import { findNormalizedSpan, reviewIdNum, reviewLabel } from './review-label.mjs';
 import * as pdfjsLib from './vendor/pdfjs/build/pdf.min.mjs';
 
 // pdf_viewer.mjs resolves the core library through this global. Never assign
@@ -49,6 +49,8 @@ const ui = {
   zoom: el('zoom'),
   zoomIn: el('zoomIn'),
   zoomOut: el('zoomOut'),
+  copyPath: el('copyPath'),
+  copyName: el('copyName'),
   mode: el('mode'),
   wrap: el('wrap'),
   raw: el('raw'),
@@ -1978,15 +1980,42 @@ function basenameFromPath(path) {
   return match ? match[1] : path;
 }
 
+async function copyFileText(which) {
+  if (!state.file) {
+    setStatus('Open a file first');
+    return;
+  }
+  const text = which === 'name' ? state.file.name : state.file.path;
+  if (!text) {
+    setStatus('Nothing to copy');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus(which === 'name' ? 'Copied the file name' : 'Copied the full path');
+  } catch {
+    setStatus('Clipboard refused the text', { error: true });
+  }
+}
+
 /// The last `[data-line]` at or before `node` in the rendered Markdown.
 function lineNear(node, root) {
   if (!node || !root) {
     return null;
   }
   const el = node.nodeType === 3 ? node.parentElement : node;
-  const anchor = el?.closest('[data-line]');
+  if (!(el instanceof Element) || !root.contains(el)) {
+    return null;
+  }
+  const anchor = el.closest('[data-line]');
   if (anchor && root.contains(anchor)) {
     const line = Number(anchor.dataset.line);
+    return Number.isFinite(line) && line >= 1 ? line : null;
+  }
+  const block = el.closest('#markdown > *');
+  const inBlock = block?.querySelector('[data-line]');
+  if (inBlock) {
+    const line = Number(inBlock.dataset.line);
     return Number.isFinite(line) && line >= 1 ? line : null;
   }
   const walker = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT, (candidate) => {
@@ -2083,9 +2112,16 @@ function hasLocator(record) {
   return Boolean(record.at?.line || record.at?.page);
 }
 
+let reviewAnchorRect = null;
+
 function openNoteBox() {
-  hideReviewChrome();
   const picked = describeSelection();
+  const range = selectionInDocument();
+  const rect =
+    range && (range.getBoundingClientRect().width || range.getBoundingClientRect().height)
+      ? range.getBoundingClientRect()
+      : reviewAnchorRect;
+  hideReviewChrome();
   if (!picked) {
     setStatus('Select some text first');
     return;
@@ -2100,9 +2136,24 @@ function openNoteBox() {
   }
 
   state.pendingNote = picked;
-  ui.noteBox.hidden = false;
   ui.noteRef.textContent = formatSelection(picked);
-  ui.noteText.focus();
+  ui.noteBox.hidden = false;
+  placeNoteBox(rect);
+  ui.noteText.focus({ preventScroll: true });
+}
+
+function placeNoteBox(rect) {
+  if (rect && (rect.width || rect.height)) {
+    const height = ui.noteBox.offsetHeight || 72;
+    const below = rect.bottom + 8;
+    const y =
+      below + height <= window.innerHeight - 8
+        ? below
+        : Math.max(8, rect.top - height - 8);
+    placeFloating(ui.noteBox, rect.left, y);
+    return;
+  }
+  placeFloating(ui.noteBox, Math.max(8, window.innerWidth / 2 - 130), Math.max(8, window.innerHeight / 3));
 }
 
 async function saveNote() {
@@ -2432,34 +2483,48 @@ function unwrapReviewMarks(root) {
 }
 
 /// Wash the existing nodes. Wrapping PDF.js spans in `<mark>` swaps the font.
+/// Quotes are matched on the joined layer: a 24-character needle that sits
+/// across two spans would miss if we only looked inside each node.
 function tintQuote(root, quote, id) {
-  const needle = quote.replace(/\s+/g, ' ').trim();
+  const needle = quote.replace(/\s+/g, ' ').trim().toLowerCase();
   if (!root || needle.length < 2) {
     return null;
   }
-  const snippet = needle.slice(0, 48).toLowerCase();
-  const short = snippet.slice(0, Math.min(24, snippet.length));
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const parts = [];
+  let joined = '';
   let node;
   while ((node = walker.nextNode())) {
-    const norm = node.textContent.replace(/\s+/g, ' ').toLowerCase();
-    if (!norm.includes(short)) {
+    const piece = node.textContent.replace(/\s+/g, ' ').toLowerCase();
+    if (!piece.trim()) {
       continue;
     }
-    let el = node.parentElement;
-    const first = el;
-    let covered = '';
-    while (el && root.contains(el)) {
-      applyReviewTint(el, id);
-      covered += ` ${el.textContent.replace(/\s+/g, ' ')}`;
-      if (covered.toLowerCase().includes(snippet) || covered.length >= needle.length) {
-        return first;
-      }
-      el = el.nextElementSibling;
+    if (joined && !joined.endsWith(' ') && !piece.startsWith(' ')) {
+      joined += ' ';
     }
-    return first;
+    const start = joined.length;
+    joined += piece.startsWith(' ') && joined.endsWith(' ') ? piece.trimStart() : piece;
+    parts.push({ node, start, end: joined.length });
   }
-  return null;
+  const found = findNormalizedSpan(joined, needle);
+  if (!found) {
+    return null;
+  }
+  const { start: idx, end } = found;
+  let first = null;
+  for (const part of parts) {
+    if (part.end <= idx || part.start >= end) {
+      continue;
+    }
+    const el = part.node.parentElement;
+    if (el && root.contains(el)) {
+      applyReviewTint(el, id);
+      if (!first) {
+        first = el;
+      }
+    }
+  }
+  return first;
 }
 
 function paintMarkdownMarks() {
@@ -2604,6 +2669,7 @@ function showReviewChip() {
   if (rect.width === 0 && rect.height === 0) {
     return;
   }
+  reviewAnchorRect = rect;
   ui.reviewChip.hidden = false;
   placeFloating(ui.reviewChip, rect.right + 4, rect.top - 34);
 }
@@ -2689,6 +2755,8 @@ ui.zoom.addEventListener('change', () => {
 
 ui.zoomIn.addEventListener('click', () => stepZoom(1));
 ui.zoomOut.addEventListener('click', () => stepZoom(-1));
+ui.copyPath.addEventListener('click', () => void copyFileText('path'));
+ui.copyName.addEventListener('click', () => void copyFileText('name'));
 ui.mode.addEventListener('click', (event) => cycleMode(event.shiftKey || event.altKey));
 ui.print.addEventListener('click', printDocument);
 // ── Updates ───────────────────────────────────────────────────────────────
@@ -2820,7 +2888,7 @@ ui.container.addEventListener('scroll', hideReviewChrome, { passive: true });
 ui.markdownStage.addEventListener('scroll', hideReviewChrome, { passive: true });
 document.addEventListener('pointerdown', (event) => {
   const target = event.target;
-  if (target instanceof Element && target.closest('#reviewChip, #reviewMenu')) {
+  if (target instanceof Element && target.closest('#reviewChip, #reviewMenu, #noteBox')) {
     return;
   }
   hideReviewMenu();

@@ -96,6 +96,13 @@
       <symbol id="i-add-review" viewBox="0 0 16 16" fill="none">
         <path d="M8 3.5V12.5M3.5 8H12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
       </symbol>
+      <symbol id="i-copy-path" viewBox="0 0 16 16" fill="none">
+        <path d="M2.5 12.5V5C2.5 4.45 2.95 4 3.5 4H6.2L7.5 5.6H12.5C13.05 5.6 13.5 6.05 13.5 6.6V12.5C13.5 13.05 13.05 13.5 12.5 13.5H3.5C2.95 13.5 2.5 13.05 2.5 12.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      </symbol>
+      <symbol id="i-copy-name" viewBox="0 0 16 16" fill="none">
+        <path d="M5 2.5H9.5L13 6V13.5H5C4.45 13.5 4 13.05 4 12.5V3.5C4 2.95 4.45 2.5 5 2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+        <path d="M9.5 2.5V6H13" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      </symbol>
     </svg>
 
     <header id="bar">
@@ -147,6 +154,12 @@
         </select>
         <button id="zoomIn" type="button" title="Zoom in (+)" aria-label="Zoom in">
           <svg class="icon"><use href="#i-zoom-in"/></svg>
+        </button>
+        <button id="copyPath" type="button" class="file-only" title="Copy the full path" aria-label="Copy the full path">
+          <svg class="icon"><use href="#i-copy-path"/></svg>
+        </button>
+        <button id="copyName" type="button" class="file-only" title="Copy the file name" aria-label="Copy the file name">
+          <svg class="icon"><use href="#i-copy-name"/></svg>
         </button>
       </div>
       <div class="spacer"></div>

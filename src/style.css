@@ -27,9 +27,9 @@
   --review-1-line: #c4241a;
   --review-2: rgba(30, 90, 220, 0.26);
   --review-2-line: #1a4fc4;
-  --review-3: rgba(210, 150, 10, 0.32);
-  --review-3-line: #9a6f00;
-  --review-4: rgba(20, 140, 70, 0.26);
+  --review-3: rgba(210, 80, 0, 0.36);
+  --review-3-line: #c45a00;
+  --review-4: rgba(20, 140, 70, 0.32);
   --review-4-line: #1a7f4b;
   --review-5: rgba(140, 50, 190, 0.26);
   --review-5-line: #7a28b8;
@@ -71,9 +71,9 @@
   --review-1-line: #f0877a;
   --review-2: rgba(90, 150, 255, 0.36);
   --review-2-line: #6fb3f2;
-  --review-3: rgba(255, 200, 80, 0.36);
-  --review-3-line: #e0b040;
-  --review-4: rgba(80, 210, 130, 0.36);
+  --review-3: rgba(255, 150, 40, 0.42);
+  --review-3-line: #ff9a3c;
+  --review-4: rgba(80, 210, 130, 0.40);
   --review-4-line: #6fce9d;
   --review-5: rgba(200, 130, 255, 0.36);
   --review-5-line: #c090f0;
@@ -111,9 +111,9 @@
     --review-1-line: #f0877a;
     --review-2: rgba(90, 150, 255, 0.36);
     --review-2-line: #6fb3f2;
-    --review-3: rgba(255, 200, 80, 0.36);
-    --review-3-line: #e0b040;
-    --review-4: rgba(80, 210, 130, 0.36);
+    --review-3: rgba(255, 150, 40, 0.42);
+    --review-3-line: #ff9a3c;
+    --review-4: rgba(80, 210, 130, 0.40);
     --review-4-line: #6fce9d;
     --review-5: rgba(200, 130, 255, 0.36);
     --review-5-line: #c090f0;
@@ -759,6 +759,11 @@ body.mode-invert .pdfViewer .page .canvasWrapper {
   --highlight-selected-bg-color: rgb(255 128 42 / 0.98);
 }
 
+.pdfViewer .textLayer ::selection {
+  background: color-mix(in srgb, var(--accent) 45%, transparent) !important;
+  color: transparent;
+}
+
 /* ── Find bar ────────────────────────────────────────────────────────── */
 #find {
   position: absolute;
@@ -791,16 +796,14 @@ body.mode-invert .pdfViewer .page .canvasWrapper {
 
 
 #noteBox {
-  position: absolute;
-  top: 10px;
-  right: 16px;
-  z-index: 4;
+  position: fixed;
+  z-index: 7;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 4px 6px;
+  padding: 6px 8px;
   border: 1px solid var(--widget-border);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--widget);
   box-shadow: 0 4px 16px var(--shadow);
 }
@@ -816,7 +819,8 @@ body.mode-invert .pdfViewer .page .canvasWrapper {
 }
 
 #noteText {
-  width: 200px;
+  width: 240px;
+  max-width: min(240px, calc(100vw - 32px));
   padding: 2px 4px;
   border: 1px solid var(--widget-border);
   border-radius: 2px;
@@ -906,7 +910,8 @@ body:not(.kind-image) #imageStage {
 
 body:not(.kind-pdf) .pdf-only,
 body:not(.kind-image) .image-only,
-body:not(.kind-markdown) .md-only {
+body:not(.kind-markdown) .md-only,
+body:not(.has-file) .file-only {
   display: none;
 }
 
@@ -1027,7 +1032,7 @@ body.mode-sepia #markdownStage {
 
 #markdown ::selection,
 #markdown *::selection {
-  background: color-mix(in srgb, var(--accent) 32%, transparent);
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
   color: inherit;
   -webkit-text-fill-color: inherit;
 }

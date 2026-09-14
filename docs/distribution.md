@@ -70,12 +70,14 @@ winget install RicardoFrantz.pdf-next
 ```
 
 The Windows NSIS template is `src-tauri/windows/installer.nsi`, a copy of
-Tauri's with one extra lookup: a previous install is found under
+Tauri's with two extra behaviours. A previous install is found under
 `Software\frantz\pdf-next` (0.9.0), `Software\Ricardo Frantz\pdf-next`
 (0.9.2), or Add/Remove Programs `InstallLocation`. Without that, a
 publisher change runs the old uninstaller with an empty `_?=` path and
-the setup says "Unable to uninstall!". Re-copy the file from
-`@tauri-apps/cli` when that crate is upgraded.
+the setup says "Unable to uninstall!". And a double-click is passive:
+progress, then the app, no wizard (`/W` brings it back; `/S` stays
+silent for the Store). Re-copy the file from `@tauri-apps/cli` when that
+crate is upgraded.
 
 For a new version: copy the folder, change `PackageVersion`, `InstallerUrl`,
 `InstallerSha256` (`sha256sum` of the `.exe` from the release page, upper

@@ -1,9 +1,12 @@
 Unicode true
 ; pdf-next copy of tauri-bundler's installer.nsi from @tauri-apps/cli-v2.11.4.
-; Re-copy when the CLI is upgraded. The only edits are ResolvePreviousInstallDir
-; and the upgrade default: 0.9.0 stored the install path under Software\frantz
-; (from the identifier). A later publisher looks in a different key, runs
-; uninstall.exe with `_?=` empty, and the user sees "Unable to uninstall!".
+; Re-copy when the CLI is upgraded. Edits on top of that template:
+; - ResolvePreviousInstallDir: 0.9.0 stored the path under Software\frantz.
+;   A later publisher looked in a different key, ran uninstall.exe with `_?=`
+;   empty, and the setup said "Unable to uninstall!".
+; - Passive by default: a double-click shows the copy progress, then opens
+;   the app. No Welcome / License / Directory / Finish. `/W` brings the
+;   wizard back; `/S` stays silent for the Store.
 ManifestDPIAware true
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
 ; Currently undocumented on NSIS's website but is in the Docs folder of source tree, see
@@ -319,6 +322,12 @@ Function PageReinstallUpdateSelection
   ${EndIf}
 FunctionEnd
 Function PageLeaveReinstall
+  ; Passive has no radio buttons. Overwrite; do not run the old uninstaller.
+  ${If} $PassiveMode = 1
+  ${AndIf} $WixMode <> 1
+    Goto reinst_done
+  ${EndIf}
+
   ${NSD_GetState} $R2 $R1
 
   ; If migrating from Wix, always uninstall
@@ -490,7 +499,13 @@ FunctionEnd
 {{/each}}
 
 Function .onInit
-  ${GetOptions} $CMDLINE "/P" $PassiveMode
+  ; One click: skip the wizard unless `/W` asks for it.
+  StrCpy $PassiveMode 1
+  ${GetOptions} $CMDLINE "/W" $0
+  ${IfNot} ${Errors}
+    StrCpy $PassiveMode 0
+  ${EndIf}
+  ${GetOptions} $CMDLINE "/P" $0
   ${IfNot} ${Errors}
     StrCpy $PassiveMode 1
   ${EndIf}
@@ -738,10 +753,10 @@ Section Install
     Call CreateOrUpdateStartMenuShortcut
   !insertmacro MUI_STARTMENU_WRITE_END
 
-  ; Create desktop shortcut for silent and passive installers
-  ; because finish page will be skipped
-  ${If} $PassiveMode = 1
-  ${OrIf} ${Silent}
+  ; Desktop icon only for a Store-style silent install. The GUI is passive
+  ; by default now, and a start-menu shortcut is enough to find the app.
+  ${If} ${Silent}
+  ${AndIf} $UpdateMode <> 1
     Call CreateOrUpdateDesktopShortcut
   ${EndIf}
 
@@ -756,15 +771,19 @@ Section Install
 SectionEnd
 
 Function .onInstSuccess
-  ; Check for `/R` flag only in silent and passive installers because
-  ; GUI installer has a toggle for the user to (re)start the app
-  ${If} $PassiveMode = 1
-  ${OrIf} ${Silent}
+  ${If} ${Silent}
+    ; The Store runs `/S`. Do not launch unless it asked (`/R`).
     ${GetOptions} $CMDLINE "/R" $R0
     ${IfNot} ${Errors}
       ${GetOptions} $CMDLINE "/ARGS" $R0
       nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "$R0"
     ${EndIf}
+  ${Else}
+    ${GetOptions} $CMDLINE "/ARGS" $R0
+    ${If} ${Errors}
+      StrCpy $R0 ""
+    ${EndIf}
+    nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "$R0"
   ${EndIf}
 FunctionEnd
 

@@ -3,7 +3,7 @@
 // one-second poll, and the mid-build gap behaviour.
 import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
-import { reviewLabel } from '../src/review-label.mjs';
+import { findNormalizedSpan, reviewLabel } from '../src/review-label.mjs';
 
 const app = await readFile('src/app.mjs', 'utf8');
 const main = await readFile('src-tauri/src/main.rs', 'utf8');
@@ -453,6 +453,26 @@ assert.match(
   /\$4 == ""[\s\S]*Goto reinst_done/,
   'An empty install dir must overwrite, not run uninstall.exe with `_?=`.',
 );
+assert.match(
+  nsisTemplate,
+  /StrCpy \$PassiveMode 1/,
+  'A double-click is passive: progress, then the app.',
+);
+assert.match(
+  nsisTemplate,
+  /CMDLINE "\/W"/,
+  '/W must still open the old wizard.',
+);
+assert.match(
+  nsisTemplate,
+  /PassiveMode = 1[\s\S]*WixMode <> 1[\s\S]*Goto reinst_done/,
+  'A passive upgrade must overwrite, not uninstall.',
+);
+assert.equal(
+  config.bundle.windows?.nsis?.installMode,
+  'currentUser',
+  'The setup must not ask for Administrator.',
+);
 
 // Updates: the webview may talk to exactly one host, only when asked, and may
 // open exactly one kind of URL, checked in Rust.
@@ -748,6 +768,32 @@ assert.match(
 );
 assert.match(page, /id="reviewPane"/, 'The Review panel lives on the right of the stage.');
 assert.match(page, /id="reviewChip"/, 'A chip after a short hold adds a review.');
+assert.match(page, /id="copyPath"/, 'The toolbar copies the full path after zoom.');
+assert.match(page, /id="copyName"/, 'The toolbar copies the file name after zoom.');
+assert.match(
+  styles,
+  /body:not\(\.has-file\) \.file-only/,
+  'Path and name copy stay hidden until a file is open.',
+);
+assert.match(
+  styles,
+  /#noteBox \{[\s\S]*?position: fixed;/,
+  'The comment box sits on the selection, not pinned to the toolbar corner.',
+);
+assert.match(
+  app,
+  /function tintQuote\([\s\S]*?findNormalizedSpan\(joined, needle\)/,
+  'A quote that spans PDF.js nodes must still receive a tint.',
+);
+assert.deepEqual(
+  findNormalizedSpan('hello world from page', 'hello world'),
+  { start: 0, end: 11 },
+);
+assert.deepEqual(
+  findNormalizedSpan('the start of a much longer quote lives here', 'start of a much longer quote'),
+  { start: 4, end: 32 },
+);
+assert.equal(findNormalizedSpan('nope', 'missing phrase here'), null);
 assert.match(page, /id="reviewMenu"/, 'Right-click on a selection adds a review.');
 assert.match(
   app,

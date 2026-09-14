@@ -28,6 +28,27 @@ function minorIndex(peers, review) {
   return (found < 0 ? ordered.length : found) + 1;
 }
 
+/// Index of `needle` in a whitespace-normalised haystack. A short prefix is
+/// enough when the full quote is longer than the joined layer we painted.
+export function findNormalizedSpan(joined, needle) {
+  const want = String(needle || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const hay = String(joined || '');
+  if (want.length < 2 || !hay) {
+    return null;
+  }
+  let start = hay.indexOf(want);
+  let span = want.length;
+  if (start < 0) {
+    const short = want.slice(0, Math.min(24, want.length));
+    start = hay.indexOf(short);
+    span = short.length;
+  }
+  if (start < 0) {
+    return null;
+  }
+  return { start, end: start + span };
+}
+
 export function reviewLabel(review, reviews) {
   const list = Array.isArray(reviews) ? reviews : [];
   const place = reviewPlace(review);

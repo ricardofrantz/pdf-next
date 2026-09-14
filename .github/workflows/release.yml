@@ -92,7 +92,8 @@ jobs:
           releaseBody: |
             Download the build for your system below.
 
-            - **Windows** — `.exe` installer, or `winget install RicardoFrantz.pdf-next`.
+            - **Windows** — `.exe` installer (one click after SmartScreen:
+              it copies and opens), or `winget install RicardoFrantz.pdf-next`.
               If SmartScreen warns (an unsigned build), choose *More info -> Run anyway*.
             - **macOS** — universal `.dmg` (Intel and Apple Silicon), or
               `brew install --cask ricardofrantz/tap/pdf-next`. Unsigned, so
