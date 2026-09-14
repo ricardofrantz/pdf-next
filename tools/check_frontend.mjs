@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
 import { findNormalizedSpan, reviewLabel } from '../src/review-label.mjs';
+import { mapCollapsedIndex, reconcilePendingComment } from '../src/review-sync.mjs';
 import {
   REVIEW_SIZE_DEFAULT,
   REVIEW_SIZE_STEPS,
@@ -121,8 +122,23 @@ assert.match(
 // make the window jump while you work.
 assert.match(
   app,
-  /if \(view\) \{[\s\S]*?\} else \{[\s\S]*?await sizeToDocument\(file\.path, width, height\)/,
-  'The window may only be refitted when opening a file, not when reloading it.',
+  /if \(view\) \{[\s\S]*?\} else \{[\s\S]*?await trimWindowToContent\(\{ recenter: true \}\)/,
+  'The window may only be trimmed when opening a file, not when reloading it.',
+);
+assert.match(
+  app,
+  /pdfViewer\.currentScaleValue = '1';[\s\S]*?await trimWindowToContent/,
+  'A fresh PDF open is 100%, then the window hugs that page — not page-fit into a large window.',
+);
+assert.match(
+  app,
+  /function pageBoxReady\(\)[\s\S]*?Math\.abs\(scale - 1\)/,
+  'Trim must wait for 100% layout, not a leftover page-fit box.',
+);
+assert.match(
+  main,
+  /if window\.is_maximized\(\)\.unwrap_or\(false\) \{\s*let _ = window\.unmaximize\(\);/,
+  'A maximized window must come off maximize or set_size cannot trim it.',
 );
 assert.match(
   main,
@@ -142,7 +158,17 @@ assert.match(
 assert.match(
   main,
   /fn watch_review_sidecar\([\s\S]*?"reviews-changed"/,
-  'The same poll tick must follow {stem}_review.json and emit reviews-changed, not file-changed.',
+  'A sidecar change must emit reviews-changed, not file-changed.',
+);
+assert.match(
+  main,
+  /fn document_watch_due\(poll_seconds: u64, since_last: Duration\) -> bool \{\s*poll_seconds != 0/,
+  'Document poll at 0 must not be required for sidecar watching.',
+);
+assert.match(
+  main,
+  /watch_review_sidecar\([\s\S]*?if !document_watch_due/,
+  'The sidecar must be stated before the document-poll gate.',
 );
 assert.match(
   main,
@@ -166,13 +192,13 @@ assert.match(
 );
 assert.match(
   app,
-  /async function dockTo\(edge\)[\s\S]*?currentScaleValue = undocking \? 'page-fit' : 'page-width'/,
-  'Docking to any edge must fit the width; only undocking goes back to fit-page.',
+  /async function dockTo\(edge\)[\s\S]*?if \(!undocking\) \{\s*pdfViewer\.currentScaleValue = 'page-width'/,
+  'Docking to any edge must fit the width; undocking trims to the page at 100%.',
 );
 assert.match(
   app,
-  /async function dockTo\(edge\)[\s\S]*?const auto = autoWindowSize\(\);[\s\S]*?await fitWindow\(auto\[0\], auto\[1\], true\)/,
-  'Undocking must restore the automatic fit to the document.',
+  /async function dockTo\(edge\)[\s\S]*?await trimWindowToContent\(\{ recenter: true \}\)/,
+  'Undocking must trim the window to the document.',
 );
 assert.match(
   main,
@@ -210,7 +236,7 @@ assert.match(
 );
 assert.match(
   styles,
-  /body\.wrap-on #imageStage \{[^}]*padding: 0/s,
+  /body\.wrap-on #imageStage(?:,\s*body\.hug #imageStage)? \{[^}]*padding: 0/s,
   'An exact fit means no padding: the window frame is the edge of the picture.',
 );
 assert.match(
@@ -794,6 +820,21 @@ assert.match(
 );
 assert.match(
   app,
+  /async function reloadReviewsFromDisk\(\) \{\s*await loadReviews\(\{ fromDisk: true \}\)/,
+  'An agent write must load disk first, not flush a panel draft over it.',
+);
+assert.doesNotMatch(
+  app,
+  /async function reloadReviewsFromDisk\(\) \{[^}]*flushCommentSave/,
+  'reloadReviewsFromDisk must not write the panel back to disk before reading.',
+);
+assert.match(
+  app,
+  /from '\.\/review-sync\.mjs'/,
+  'Panel drafts vs agent writes share a reconcile helper.',
+);
+assert.match(
+  app,
   /const COMMENT_SAVE_MS = 400/,
   'A panel comment must write the sidecar as you type.',
 );
@@ -843,6 +884,22 @@ assert.match(
 assert.match(page, /id="reviewChip"/, 'A chip after a short hold adds a review.');
 assert.match(page, /id="copyPath"/, 'The toolbar copies the full path after zoom.');
 assert.match(page, /id="copyName"/, 'The toolbar copies the file name after zoom.');
+assert.match(page, /id="reduce"/, 'PDF toolbar can write a smaller name_reduced.pdf.');
+assert.match(
+  page,
+  /id="ask"[\s\S]*?#i-ask[\s\S]*?id="note"[\s\S]*?#i-add-review[\s\S]*?id="notes"[\s\S]*?#i-review/,
+  'Copy selection, add review, and review panel each have their own icon.',
+);
+assert.match(
+  app,
+  /invoke\('reduce_pdf'/,
+  'Reduce size calls the Rust picamatl command.',
+);
+assert.match(
+  app,
+  /_reduced\.pdf|reduceOpenPdf/,
+  'Reduce opens the written sibling when smaller.',
+);
 assert.match(
   styles,
   /body:not\(\.has-file\) \.file-only/,
@@ -855,8 +912,18 @@ assert.match(
 );
 assert.match(
   app,
-  /function tintQuote\([\s\S]*?findNormalizedSpan\(joined, needle\)/,
+  /function wrapPdfQuote\([\s\S]*?wrapQuoteFragments\(layer, quote, id/,
   'A quote that spans PDF.js nodes must still receive a tint.',
+);
+assert.match(
+  app,
+  /createElement\(asMark \? 'mark' : 'review-q'\)/,
+  'PDF quotes wrap matched glyphs in <review-q>, not a textLayer span.',
+);
+assert.match(
+  styles,
+  /\.textLayer review-q/,
+  'PDF quote wash targets <review-q>, which PDF.js does not absolutize.',
 );
 assert.deepEqual(
   findNormalizedSpan('hello world from page', 'hello world'),
@@ -867,6 +934,42 @@ assert.deepEqual(
   { start: 4, end: 32 },
 );
 assert.equal(findNormalizedSpan('nope', 'missing phrase here'), null);
+assert.equal(mapCollapsedIndex('hello', 2), 2);
+assert.equal(mapCollapsedIndex('a  b', 1), 1);
+assert.equal(mapCollapsedIndex('a  b', 2), 3);
+{
+  const saved = [{ id: 'r1', comment: 'old' }, { id: 'r2', comment: 'keep' }];
+  const draft = { id: 'r1', comment: 'typing' };
+  assert.equal(
+    reconcilePendingComment(draft, [{ id: 'r2', comment: 'keep' }], saved).keepDraftId,
+    null,
+    'Agent delete of the draft id drops the draft.',
+  );
+  assert.equal(
+    reconcilePendingComment(
+      draft,
+      [
+        { id: 'r1', comment: 'agent fix' },
+        { id: 'r2', comment: 'keep' },
+      ],
+      saved,
+    ).keepDraftId,
+    null,
+    'Agent edit of that comment drops the draft.',
+  );
+  assert.equal(
+    reconcilePendingComment(
+      draft,
+      [
+        { id: 'r1', comment: 'old' },
+        { id: 'r2', comment: 'agent other' },
+      ],
+      saved,
+    ).keepDraftId,
+    'r1',
+    'Agent edit of another id keeps the in-progress comment.',
+  );
+}
 assert.match(page, /id="reviewMenu"/, 'Right-click on a selection adds a review.');
 assert.match(
   app,
@@ -880,13 +983,28 @@ assert.match(
 );
 assert.match(
   app,
-  /function tintQuote\([\s\S]*?applyReviewTint\(el, id\)/,
-  'Review marks wash the existing nodes; they must not wrap them.',
+  /PDF\.js styles[\s\S]*?position:absolute[\s\S]*?nested span/,
+  'PDF quote wash must not nest a span inside the textLayer.',
 );
-assert.doesNotMatch(
+{
+  const wrap = app.match(/function wrapQuoteFragments\([\s\S]*?\nfunction wrapPdfQuote/)?.[0] || '';
+  assert.ok(wrap, 'wrapQuoteFragments must sit next to wrapPdfQuote.');
+  assert.doesNotMatch(
+    wrap,
+    /createElement\('span'\)/,
+    'A nested textLayer span becomes position:absolute and washes the whole line.',
+  );
+  assert.doesNotMatch(
+    wrap,
+    /createElement\('mark'\)/,
+    'Wrapping PDF.js text in bare createElement(mark) is only for markdown via asMark.',
+  );
+  assert.match(wrap, /'review-q'/, 'PDF path creates <review-q>.');
+}
+assert.match(
   app,
-  /function tintQuote\([\s\S]*?createElement\('mark'\)/,
-  'Wrapping PDF.js text in <mark> swaps the font and makes the line unreadable.',
+  /function wrapQuoteIn\([\s\S]*?asMark: true/,
+  'Markdown quotes wrap the matched words.',
 );
 assert.match(
   styles,

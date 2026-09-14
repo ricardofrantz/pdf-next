@@ -1,12 +1,12 @@
 [package]
 name = "pdf-next"
-version = "0.12.2"
+version = "0.13.0"
 description = "Tiny, fast PDF, image and markdown viewer that reloads when the file changes"
 authors = ["Ricardo Frantz"]
 license = "MIT"
 repository = "https://github.com/ricardofrantz/pdf-next"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -28,6 +28,8 @@ percent-encoding = "2"
 # frontend may ask to open, and it is checked in Rust first.
 open = "5"
 pulldown-latex = "0.8.0"
+# Pure-Rust PDF shrink (no Ghostscript). Writes `{stem}_reduced.pdf`.
+picamatl = "0.4"
 
 # A file dropped on the window arrives as a list of paths that can be empty:
 # macOS carries the names on more than one pasteboard type and the webview

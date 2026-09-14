@@ -2,6 +2,7 @@
 // showing the newest version of it.
 import { bootIsFine, failures, mark } from './smoke.mjs';
 import { findNormalizedSpan, reviewIdNum, reviewLabel } from './review-label.mjs';
+import { mapCollapsedIndex, reconcilePendingComment } from './review-sync.mjs';
 import {
   REVIEW_SIZE_DEFAULT,
   REVIEW_SIZE_STEPS,
@@ -62,6 +63,7 @@ const ui = {
   raw: el('raw'),
   ask: el('ask'),
   notes: el('notes'),
+  reduce: el('reduce'),
   dockButtons: {
     left: el('dockLeft'),
     right: el('dockRight'),
@@ -325,51 +327,6 @@ async function releaseDocument() {
   }
 }
 
-// Window sizes are remembered per file, so reopening the same paper gives you
-// back the window you had. Kept in the webview's own storage — no cache file to
-// manage, and it is wiped with the app's data like any other preference.
-const SIZE_KEY = 'pdf-next.sizes';
-const SIZE_LIMIT = 80;
-
-// Parsed once and kept: the map is consulted on every open and every resize,
-// and re-parsing JSON out of localStorage each time is pure waste.
-let sizesCache = null;
-
-function readSizes() {
-  if (sizesCache) {
-    return sizesCache;
-  }
-  try {
-    sizesCache = JSON.parse(localStorage.getItem(SIZE_KEY) || '{}');
-  } catch {
-    sizesCache = {};
-  }
-  return sizesCache;
-}
-
-function rememberedSize(path) {
-  const entry = readSizes()[path];
-  return Array.isArray(entry) && entry.length === 2 ? entry : null;
-}
-
-function rememberSize(path, width, height) {
-  if (!path || !(width > 80) || !(height > 80)) {
-    return;
-  }
-  const sizes = readSizes();
-  delete sizes[path];
-  sizes[path] = [Math.round(width), Math.round(height)];
-  const paths = Object.keys(sizes);
-  for (const stale of paths.slice(0, Math.max(0, paths.length - SIZE_LIMIT))) {
-    delete sizes[stale];
-  }
-  try {
-    localStorage.setItem(SIZE_KEY, JSON.stringify(sizes));
-  } catch {
-    // Out of quota is not worth interrupting the reader over.
-  }
-}
-
 /// Everything above the stage — the toolbar, plus the tab strip when it is
 /// showing. Measured rather than read from --bar-height: the strip appears and
 /// disappears, and a window fit that guessed this would be wrong by its height.
@@ -394,36 +351,6 @@ async function fitWindow(width, height, recenter, exact = false) {
     await invoke('fit_window', { width, height, recenter, exact });
   } catch {
     // A window that will not resize is not worth failing the open over.
-  }
-}
-
-/// The window size that wraps the document at 100%, in logical pixels. Used on
-/// a fresh open, where the page is about to be laid out and a scrollbar may
-/// appear; the exact fit in wrapWindowSize() measures what is already there.
-function autoWindowSize() {
-  if (!state.natural) {
-    return null;
-  }
-  const scrollbar = Math.max(
-    ui.container.offsetWidth - ui.container.clientWidth,
-    0,
-  );
-  return [
-    state.natural.width + scrollbar,
-    state.natural.height + chromeHeight(),
-  ];
-}
-
-async function sizeToDocument(path, contentWidth, contentHeight) {
-  state.natural = { width: contentWidth, height: contentHeight };
-  const saved = rememberedSize(path);
-  if (saved) {
-    await fitWindow(saved[0], saved[1], false);
-    return;
-  }
-  const auto = autoWindowSize();
-  if (auto) {
-    await fitWindow(auto[0], auto[1], true);
   }
 }
 
@@ -741,19 +668,7 @@ async function showMarkdown(file, view, generation, fit) {
   if (!fit) {
     return;
   }
-  const saved = rememberedSize(file.path);
-  if (saved) {
-    await fitWindow(saved[0], saved[1], false);
-  } else {
-    // Exact: a long document clamps to the screen height without dragging the
-    // width down with it, which aspect preservation would do.
-    await fitWindow(
-      MARKDOWN_WINDOW_WIDTH,
-      state.natural.height + chromeHeight(),
-      true,
-      true,
-    );
-  }
+  await trimWindowToContent({ recenter: true });
 }
 
 /// `_review.json` is prose too, but it is already text — no renderer.
@@ -780,17 +695,7 @@ async function showJson(file, view, generation, fit) {
   if (!fit) {
     return;
   }
-  const saved = rememberedSize(file.path);
-  if (saved) {
-    await fitWindow(saved[0], saved[1], false);
-  } else {
-    await fitWindow(
-      MARKDOWN_WINDOW_WIDTH,
-      state.natural.height + chromeHeight(),
-      true,
-      true,
-    );
-  }
+  await trimWindowToContent({ recenter: true });
 }
 
 // ── Fitting the window to the content ─────────────────────────────────────
@@ -840,10 +745,15 @@ function contentSize() {
 
 /// The window that wraps the content exactly. No scrollbar allowance — with an
 /// exact window there is nothing left to scroll — and no padding, because
-/// body.wrap-on has already taken the stage's padding to zero.
+/// body.wrap-on has already taken the stage's padding to zero. The Review
+/// pane sits on the stage, so a trim has to leave room for it.
 function wrapWindowSize() {
   const content = contentSize();
-  return content ? [content[0], content[1] + chromeHeight()] : null;
+  if (!content) {
+    return null;
+  }
+  const extra = state.reviewOpen ? REVIEW_PANE_WIDTH : 0;
+  return [content[0] + extra, content[1] + chromeHeight()];
 }
 
 let wrapTimer = 0;
@@ -871,18 +781,72 @@ function scheduleWrap() {
 }
 
 async function applyWrap() {
+  await trimWindowToContent();
+}
+
+/// One-shot: shrink the window to the page that is already on screen.
+/// Reloads and tab switches do not call this — only a fresh open, and the
+/// wrap button. A docked half-screen is a size the reader asked for.
+async function trimWindowToContent({ recenter = false } = {}) {
+  if (state.docked) {
+    return;
+  }
   const size = wrapWindowSize();
   if (!size) {
     return;
   }
+  document.body.classList.add('hug');
   holdResize();
   try {
-    await fitWindow(size[0], size[1], false, true);
+    await fitWindow(size[0], size[1], recenter, true);
   } finally {
     // Restart the hold now the call has returned, so it covers the resize
     // event that follows rather than the round trip that preceded it.
     holdResize();
   }
+}
+
+function pageBoxReady() {
+  const index = Math.max(0, (pdfViewer.currentPageNumber || 1) - 1);
+  const div = pdfViewer.getPageView?.(index)?.div;
+  if (!div?.offsetWidth) {
+    return false;
+  }
+  // A leftover page-fit box is "ready" but the wrong size. Wait until 100%.
+  const scale = Number(pdfViewer.currentScale);
+  if (!Number.isFinite(scale) || Math.abs(scale - 1) > 0.04) {
+    return false;
+  }
+  const want = state.natural?.width;
+  if (want > 0) {
+    return Math.abs(div.offsetWidth - want) / want < 0.15;
+  }
+  return true;
+}
+
+async function waitForPdfPageBox() {
+  if (pageBoxReady()) {
+    return;
+  }
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      eventBus.off('pagerendered', onRender);
+      window.clearTimeout(timer);
+      resolve();
+    };
+    const onRender = () => {
+      if (pageBoxReady()) {
+        finish();
+      }
+    };
+    const timer = window.setTimeout(finish, 2000);
+    eventBus.on('pagerendered', onRender);
+  });
 }
 
 /// One button: while it is on, the window follows the content. Zoom out and the
@@ -989,13 +953,17 @@ async function showPdf(file, view, generation) {
   if (view) {
     restoreView(view);
   } else {
-    // PDF.js reports page 1 in points; CSS pixels are 96/72 of that.
+    // 100%, then trim the window to that page. page-fit into a large or
+    // maximized window is what left a band of empty desk on a big screen.
     const page = await pdfDocument.getPage(1);
     const { width, height } = page.getViewport({
       scale: 96 / 72,
     });
-    await sizeToDocument(file.path, width, height);
-    pdfViewer.currentScaleValue = 'page-fit';
+    state.natural = { width, height };
+    pdfViewer.currentScaleValue = '1';
+    await waitForPdfPageBox();
+    await trimWindowToContent({ recenter: true });
+    scheduleWrap();
   }
   updatePageControls();
 }
@@ -1072,10 +1040,10 @@ function showImage(file, fit, view) {
       if (view) {
         restoreImageView(view);
       } else {
-        setImageScale('fit', { refit: false });
+        setImageScale(1, { refit: false });
       }
       if (fit) {
-        sizeToDocument(file.path, ui.image.naturalWidth, ui.image.naturalHeight);
+        void trimWindowToContent({ recenter: true });
       }
       scheduleWrap();
     },
@@ -1942,11 +1910,12 @@ async function dockTo(edge) {
   holdResize();
   try {
     if (undocking) {
-      const auto = autoWindowSize();
-      if (!auto) {
-        return;
+      setDocked(null);
+      if (state.document) {
+        pdfViewer.currentScaleValue = '1';
+        await waitForPdfPageBox();
       }
-      await fitWindow(auto[0], auto[1], true);
+      await trimWindowToContent({ recenter: true });
     } else {
       await invoke('snap', { edge });
     }
@@ -1963,7 +1932,9 @@ async function dockTo(edge) {
   // The preset is set now; the container observer re-applies it once the window
   // has actually changed shape. The delay is for the page: restoring it before
   // the reflow lands puts the scroll offset on the old layout.
-  pdfViewer.currentScaleValue = undocking ? 'page-fit' : 'page-width';
+  if (!undocking) {
+    pdfViewer.currentScaleValue = 'page-width';
+  }
   window.setTimeout(() => {
     if (page > 1) {
       pdfViewer.currentPageNumber = page;
@@ -2243,18 +2214,11 @@ function reviewRowById(id) {
   return null;
 }
 
-function editingReviewComment() {
-  const el = document.activeElement;
-  if (!(el instanceof HTMLTextAreaElement) || !el.classList.contains('review-comment')) {
-    return null;
-  }
-  const id = el.closest('.review-row')?.dataset.reviewId;
-  return id ? { id, value: el.value } : null;
-}
+let commentSaveTimer = 0;
+let pendingComment = null;
 
-function applyReviewStore(store, { keepEdit = false } = {}) {
+function applyReviewStore(store, { keepDraftId = null, draft = '' } = {}) {
   const reviews = Array.isArray(store?.reviews) ? store.reviews : [];
-  const editing = keepEdit ? editingReviewComment() : null;
   const sameList =
     reviewListSignature(reviews) === reviewListSignature(state.reviews) &&
     ui.reviewList.querySelector('.review-row');
@@ -2272,18 +2236,18 @@ function applyReviewStore(store, { keepEdit = false } = {}) {
         quote.textContent = review.quote;
       }
       const comment = row.querySelector('.review-comment');
-      if (comment instanceof HTMLTextAreaElement && editing?.id !== review.id) {
+      if (comment instanceof HTMLTextAreaElement && review.id !== keepDraftId) {
         comment.value = review.comment || '';
       }
     }
   } else {
     renderReviewList();
-    if (editing) {
-      const comment = reviewRowById(editing.id)?.querySelector('.review-comment');
-      if (comment instanceof HTMLTextAreaElement) {
-        comment.value = editing.value;
-        comment.focus({ preventScroll: true });
-      }
+  }
+  if (keepDraftId) {
+    const comment = reviewRowById(keepDraftId)?.querySelector('.review-comment');
+    if (comment instanceof HTMLTextAreaElement) {
+      comment.value = draft;
+      comment.focus({ preventScroll: true });
     }
   }
   if (!samePaint) {
@@ -2293,13 +2257,30 @@ function applyReviewStore(store, { keepEdit = false } = {}) {
 
 async function loadReviews({ fromDisk = false } = {}) {
   if (!state.file || (state.file.kind !== 'markdown' && state.file.kind !== 'pdf')) {
+    pendingComment = null;
     applyReviewStore({ reviews: [] });
     return;
   }
   try {
-    applyReviewStore(await invoke('read_reviews', { document: state.file.path }), {
-      keepEdit: fromDisk,
-    });
+    const store = await invoke('read_reviews', { document: state.file.path });
+    const diskReviews = Array.isArray(store?.reviews) ? store.reviews : [];
+    let keepDraftId = null;
+    let draft = '';
+    if (fromDisk) {
+      const next = reconcilePendingComment(pendingComment, diskReviews, state.reviews);
+      pendingComment = next.pending;
+      keepDraftId = next.keepDraftId;
+      draft = next.pending?.comment ?? '';
+      if (!next.pending) {
+        window.clearTimeout(commentSaveTimer);
+        commentSaveTimer = 0;
+      }
+    } else {
+      pendingComment = null;
+      window.clearTimeout(commentSaveTimer);
+      commentSaveTimer = 0;
+    }
+    applyReviewStore(store, { keepDraftId, draft });
   } catch (error) {
     if (fromDisk && state.reviews.length) {
       return;
@@ -2311,8 +2292,8 @@ async function loadReviews({ fromDisk = false } = {}) {
   }
 }
 
+/// Disk first. Never flush a panel draft onto an agent write.
 async function reloadReviewsFromDisk() {
-  await flushCommentSave();
   await loadReviews({ fromDisk: true });
 }
 
@@ -2434,9 +2415,6 @@ function stepReviewSize(delta) {
   setReviewSize(nextReviewSize(state.reviewSize, delta));
 }
 
-let commentSaveTimer = 0;
-let pendingComment = null;
-
 function scheduleCommentSave(id, comment) {
   pendingComment = { id, comment };
   window.clearTimeout(commentSaveTimer);
@@ -2473,6 +2451,10 @@ async function updateReviewComment(id, comment, { quiet = false } = {}) {
       setStatus('Review updated');
     }
   } catch (error) {
+    if (/not found/i.test(String(error))) {
+      pendingComment = null;
+      return;
+    }
     setStatus(String(error), { error: true });
   }
 }
@@ -2600,12 +2582,18 @@ function unwrapReviewMarks(root) {
     return;
   }
   clearReviewBadges(root);
-  for (const mark of [...root.querySelectorAll('mark.review')]) {
+  for (const hit of root.querySelectorAll('.review-hit')) {
+    hit.remove();
+  }
+  // `review-q` — not `span`. PDF.js makes every textLayer span
+  // `position:absolute`; a nested span's wash then covers the whole line.
+  for (const mark of [...root.querySelectorAll('mark.review, review-q')]) {
     const parent = mark.parentNode;
     while (mark.firstChild) {
       parent.insertBefore(mark.firstChild, mark);
     }
     mark.remove();
+    parent?.normalize();
   }
   for (const el of [...root.querySelectorAll('.review-block, span.review, [data-review-tint]')]) {
     if (el.classList.contains('review-no') || el.classList.contains('review-nos')) {
@@ -2616,14 +2604,7 @@ function unwrapReviewMarks(root) {
   }
 }
 
-/// Wash the existing nodes. Wrapping PDF.js spans in `<mark>` swaps the font.
-/// Quotes are matched on the joined layer: a 24-character needle that sits
-/// across two spans would miss if we only looked inside each node.
-function tintQuote(root, quote, id) {
-  const needle = quote.replace(/\s+/g, ' ').trim().toLowerCase();
-  if (!root || needle.length < 2) {
-    return null;
-  }
+function collectTextParts(root) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const parts = [];
   let joined = '';
@@ -2636,29 +2617,84 @@ function tintQuote(root, quote, id) {
     if (joined && !joined.endsWith(' ') && !piece.startsWith(' ')) {
       joined += ' ';
     }
+    const used = piece.startsWith(' ') && joined.endsWith(' ') ? piece.trimStart() : piece;
     const start = joined.length;
-    joined += piece.startsWith(' ') && joined.endsWith(' ') ? piece.trimStart() : piece;
-    parts.push({ node, start, end: joined.length });
+    joined += used;
+    parts.push({
+      node,
+      start,
+      end: joined.length,
+      drop: piece.length - used.length,
+    });
   }
+  return { joined, parts };
+}
+
+function offsetsInPart(part, idx, end) {
+  const localStart = Math.max(0, idx - part.start) + (part.drop || 0);
+  const localEnd = Math.min(part.end, end) - part.start + (part.drop || 0);
+  const from = mapCollapsedIndex(part.node.textContent, localStart);
+  const to = mapCollapsedIndex(part.node.textContent, localEnd);
+  return [from, Math.max(from, to)];
+}
+
+/// Wrap only the matched characters. Markdown uses `<mark class="review">`.
+/// PDF uses a custom `<review-q>` — never a `<span>` — because PDF.js styles
+/// every textLayer span as `position:absolute`, and a nested span's
+/// background then paints the whole sentence box.
+function wrapQuoteFragments(root, quote, id, { asMark = false } = {}) {
+  const needle = String(quote || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!root || needle.length < 2) {
+    return null;
+  }
+  const { joined, parts } = collectTextParts(root);
   const found = findNormalizedSpan(joined, needle);
   if (!found) {
     return null;
   }
-  const { start: idx, end } = found;
   let first = null;
   for (const part of parts) {
-    if (part.end <= idx || part.start >= end) {
+    if (part.end <= found.start || part.start >= found.end) {
       continue;
     }
-    const el = part.node.parentElement;
-    if (el && root.contains(el)) {
-      applyReviewTint(el, id);
-      if (!first) {
-        first = el;
-      }
+    const node = part.node;
+    if (!node.parentNode || !root.contains(node)) {
+      continue;
+    }
+    const [from, to] = offsetsInPart(part, found.start, found.end);
+    if (to <= from) {
+      continue;
+    }
+    const textLen = node.textContent.length;
+    const endAt = Math.min(Math.max(to, from), textLen);
+    const startAt = Math.min(from, endAt);
+    if (endAt < textLen) {
+      node.splitText(endAt);
+    }
+    const mid = startAt > 0 ? node.splitText(startAt) : node;
+    const wrap = document.createElement(asMark ? 'mark' : 'review-q');
+    if (asMark) {
+      wrap.className = 'review';
+    }
+    applyReviewTint(wrap, id);
+    mid.parentNode.insertBefore(wrap, mid);
+    wrap.appendChild(mid);
+    if (!first) {
+      first = wrap;
     }
   }
   return first;
+}
+
+function wrapPdfQuote(layer, quote, id) {
+  return wrapQuoteFragments(layer, quote, id, { asMark: false });
+}
+
+function wrapQuoteIn(root, quote, id) {
+  return wrapQuoteFragments(root, quote, id, { asMark: true });
 }
 
 function paintMarkdownMarks() {
@@ -2669,7 +2705,7 @@ function paintMarkdownMarks() {
       continue;
     }
     const end = review.at.end || start;
-    let badgeHost = null;
+    const hosts = [];
     for (const anchor of ui.markdown.querySelectorAll('[data-line]')) {
       const line = Number(anchor.dataset.line);
       if (line < start || line > end) {
@@ -2679,9 +2715,24 @@ function paintMarkdownMarks() {
         anchor.parentElement && anchor.parentElement !== ui.markdown
           ? anchor.parentElement
           : anchor;
-      applyReviewTint(host, review.id);
-      if (!badgeHost) {
-        badgeHost = host;
+      hosts.push(host);
+    }
+    let badgeHost = null;
+    let wrapped = false;
+    for (const host of hosts) {
+      if (wrapQuoteIn(host, review.quote, review.id)) {
+        wrapped = true;
+        if (!badgeHost) {
+          badgeHost = host;
+        }
+      }
+    }
+    if (!wrapped) {
+      for (const host of hosts) {
+        applyReviewTint(host, review.id);
+        if (!badgeHost) {
+          badgeHost = host;
+        }
       }
     }
     if (badgeHost) {
@@ -2709,7 +2760,7 @@ function paintPdfMarks() {
       if (!layer) {
         continue;
       }
-      const first = tintQuote(layer, review.quote, review.id);
+      const first = wrapPdfQuote(layer, review.quote, review.id);
       if (first && !placed) {
         placePdfBadge(page, first, review);
         placed = true;
@@ -2893,6 +2944,51 @@ ui.copyPath.addEventListener('click', () => void copyFileText('path'));
 ui.copyName.addEventListener('click', () => void copyFileText('name'));
 ui.mode.addEventListener('click', (event) => cycleMode(event.shiftKey || event.altKey));
 ui.print.addEventListener('click', printDocument);
+ui.reduce.addEventListener('click', () => void reduceOpenPdf());
+
+function formatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) {
+    return `${n} B`;
+  }
+  if (n < 1024 * 1024) {
+    return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`;
+  }
+  return `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 2 : 1)} MB`;
+}
+
+/// Write `{stem}_reduced.pdf` beside the open PDF (original untouched).
+async function reduceOpenPdf() {
+  if (!state.file || state.file.kind !== 'pdf') {
+    setStatus('Open a PDF first');
+    return;
+  }
+  if (ui.reduce.disabled) {
+    return;
+  }
+  ui.reduce.disabled = true;
+  setStatus('Reducing…', { sticky: true });
+  try {
+    const result = await invoke('reduce_pdf', { path: state.file.path });
+    if (!result?.wrote) {
+      setStatus(`Already small (${formatBytes(result?.before)})`);
+      return;
+    }
+    const pct =
+      result.before > 0
+        ? Math.round(((result.before - result.after) * 100) / result.before)
+        : 0;
+    setStatus(
+      `${formatBytes(result.before)} → ${formatBytes(result.after)} (${pct}% · ${result.path})`,
+    );
+    await openPath(result.path);
+  } catch (error) {
+    setStatus(`Could not reduce: ${error?.message || error}`, { error: true, sticky: true });
+  } finally {
+    ui.reduce.disabled = false;
+  }
+}
+
 // ── Updates ───────────────────────────────────────────────────────────────
 //
 // One button, and one check at launch. Starting the app asks GitHub for the
@@ -3129,23 +3225,8 @@ ui.poll.addEventListener('change', () => {
   }
 });
 
-// Remember the window size per file, so reopening restores the shape you left.
-// A size the app chose for itself while wrapping is not a size the reader chose.
-let sizeTimer = 0;
 window.addEventListener('resize', () => {
   hideReviewChrome();
-  if (!state.file || wrapping) {
-    return;
-  }
-  window.clearTimeout(sizeTimer);
-  sizeTimer = window.setTimeout(async () => {
-    try {
-      const [width, height] = await invoke('window_size');
-      rememberSize(state.file.path, width, height);
-    } catch {
-      // Nothing to remember if the size cannot be read.
-    }
-  }, 600);
 });
 
 // A preset — fit page, fit width, auto — is a promise about the viewport, and

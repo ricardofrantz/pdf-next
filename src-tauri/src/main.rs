@@ -12,15 +12,15 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Mutex,
 };
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use tauri::{http, AppHandle, DragDropEvent, Emitter, Manager, State, Theme, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
-/// Poll cadence in seconds; 0 turns watching off. The watcher re-reads this
-/// every half second while it waits, so a change takes effect within one
-/// IDLE_TICK rather than at the end of the old interval.
+/// Document poll cadence in seconds; 0 turns *document* watching off.
+/// `{stem}_review.json` is followed on every IDLE_TICK while a PDF or
+/// Markdown file is open, so an agent can edit the sidecar with poll off.
 static POLL_SECONDS: AtomicU64 = AtomicU64::new(1);
 const IDLE_TICK: Duration = Duration::from_millis(500);
 
@@ -33,8 +33,8 @@ struct WatchState {
     modified: Option<SystemTime>,
     len: u64,
     missing: bool,
-    /// `{stem}_review.json` next to the watched document. The same poll
-    /// cadence follows it, so an editor save shows up in the Review panel
+    /// `{stem}_review.json` next to the watched document. Followed even when
+    /// document poll is off, so an agent save shows up in the Review panel
     /// without reloading the PDF. `sidecar_missing` starts true: no sidecar
     /// is the usual case, not a deletion to report.
     sidecar_modified: Option<SystemTime>,
@@ -314,6 +314,86 @@ fn adopt(watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
 #[tauri::command]
 fn open_path(path: String, watched: State<'_, Watched>) -> Result<FileInfo, String> {
     adopt(&watched, PathBuf::from(path))
+}
+
+#[derive(Clone, Serialize)]
+struct ReducePdfResult {
+    /// Absolute path of `{stem}_reduced.pdf` when a smaller file was written.
+    path: String,
+    before: u64,
+    after: u64,
+    wrote: bool,
+}
+
+/// `{dir}/{stem}_reduced.pdf` next to the open PDF. Never overwrites the source.
+fn reduced_pdf_path(path: &Path) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "pdf has no folder".to_string())?;
+    let stem = path
+        .file_stem()
+        .ok_or_else(|| "pdf has no name".to_string())?
+        .to_string_lossy();
+    Ok(parent.join(format!("{stem}_reduced.pdf")))
+}
+
+/// Shrink PDF bytes with picamatl. Target ~200 DPI — same ballpark as
+/// `bin/reduce_pdf`'s Ghostscript `/ebook` path. Fail-safe: never larger than
+/// the input; malformed PDFs come back unchanged.
+fn shrink_pdf_bytes(input: &[u8]) -> Vec<u8> {
+    let opts = picamatl::OptimizeOptions::default().with_target_dpi(200.0);
+    picamatl::optimize_with_options(input, opts)
+}
+
+/// Write a smaller copy beside the open PDF as `{stem}_reduced.pdf`.
+/// Leaves the original alone. Adds the copy to the served set so the
+/// frontend can open it as a tab.
+#[tauri::command]
+fn reduce_pdf(path: String, watched: State<'_, Watched>) -> Result<ReducePdfResult, String> {
+    let allowed = allowed_set(&watched)?;
+    let canonical = std::fs::canonicalize(PathBuf::from(&path)).map_err(|error| error.to_string())?;
+    if !allowed.contains(&canonical) {
+        return Err("file is not open".into());
+    }
+    if kind_for(&canonical) != "pdf" {
+        return Err("only PDF files can be reduced".into());
+    }
+
+    let input = std::fs::read(&canonical).map_err(|error| error.to_string())?;
+    let before = input.len() as u64;
+    let output = shrink_pdf_bytes(&input);
+    let after = output.len() as u64;
+    if after >= before {
+        return Ok(ReducePdfResult {
+            path: String::new(),
+            before,
+            after: before,
+            wrote: false,
+        });
+    }
+
+    let dest = reduced_pdf_path(&canonical)?;
+    if dest == canonical {
+        return Err("refusing to overwrite the open file".into());
+    }
+    let temp = dest.with_extension("pdf.reducing");
+    std::fs::write(&temp, &output).map_err(|error| error.to_string())?;
+    if let Err(error) = std::fs::rename(&temp, &dest) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.to_string());
+    }
+
+    let mut state = watched.0.lock().map_err(|error| error.to_string())?;
+    let served = std::fs::canonicalize(&dest).unwrap_or(dest.clone());
+    state.allowed.insert(served.clone());
+    drop(state);
+
+    Ok(ReducePdfResult {
+        path: display_path(&served),
+        before,
+        after,
+        wrote: true,
+    })
 }
 
 /// Sort the way a person reads file names: `fig2` before `fig10`.
@@ -1051,6 +1131,21 @@ fn fit_window(
         }
     }
 
+    // A maximized window ignores set_size on Windows until unmaximize
+    // actually lands. Wait for that or the trim never happens.
+    if window.is_maximized().unwrap_or(false) {
+        let _ = window.unmaximize();
+        #[cfg(windows)]
+        {
+            for _ in 0..25 {
+                if !window.is_maximized().unwrap_or(true) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(16));
+            }
+        }
+    }
+
     // A floor low enough that zooming a figure down still gives you the window
     // you asked for. Below roughly this the toolbar starts to clip, which is
     // the reader's business, not something to silently override.
@@ -1169,18 +1264,9 @@ async fn pick_file(app: AppHandle) -> Option<String> {
         .map(|file| file.to_string())
 }
 
-/// Wait out one poll interval in IDLE_TICK steps, re-reading the cadence each
-/// step. A shorter interval chosen mid-wait cuts the wait short, and 0 holds
-/// here until watching is turned back on.
-fn wait_for_tick() {
-    let started = std::time::Instant::now();
-    loop {
-        let seconds = POLL_SECONDS.load(Ordering::Relaxed);
-        if seconds != 0 && started.elapsed() >= Duration::from_secs(seconds) {
-            return;
-        }
-        std::thread::sleep(IDLE_TICK);
-    }
+/// Document poll is off at 0. Sidecar watching does not use this.
+fn document_watch_due(poll_seconds: u64, since_last: Duration) -> bool {
+    poll_seconds != 0 && since_last >= Duration::from_secs(poll_seconds)
 }
 
 /// A sidecar the editor is still writing is left for the next tick, the same
@@ -1289,109 +1375,118 @@ fn watch_review_sidecar(
     }
 }
 
-/// One `stat` per second. Cheap enough to be invisible, fast enough that a
-/// recompile shows up before you look back at the window.
+/// Sidecar `stat` every IDLE_TICK. Document `stat` follows POLL_SECONDS, and
+/// not at all when that is 0.
 ///
 /// The lock is held only to read and write the snapshot, never across the
 /// disk: the doc protocol and every command take the same lock, and a stat on
 /// a slow volume must not stall a page fetch.
 fn spawn_watcher(app: AppHandle) {
-    std::thread::spawn(move || loop {
-        wait_for_tick();
+    std::thread::spawn(move || {
+        let mut last_doc = Instant::now();
+        loop {
+            std::thread::sleep(IDLE_TICK);
 
-        let Some(watched) = app.try_state::<Watched>() else {
-            continue;
-        };
-        let snapshot = {
-            let Ok(state) = watched.0.lock() else {
+            let Some(watched) = app.try_state::<Watched>() else {
                 continue;
             };
-            state.path.clone().map(|path| {
-                (
-                    path,
-                    state.modified,
-                    state.len,
-                    state.missing,
-                    state.sidecar_modified,
-                    state.sidecar_len,
-                    state.sidecar_missing,
-                )
-            })
-        };
-        let Some((
-            path,
-            recorded_modified,
-            recorded_len,
-            missing,
-            sidecar_modified,
-            sidecar_len,
-            sidecar_missing,
-        )) = snapshot
-        else {
-            continue;
-        };
-
-        watch_review_sidecar(
-            &app,
-            &watched,
-            &path,
-            sidecar_modified,
-            sidecar_len,
-            sidecar_missing,
-        );
-
-        match stat(&path) {
-            Some((modified, len)) => {
-                let changed = modified != recorded_modified || len != recorded_len;
-                let reappeared = missing;
-                if (changed || reappeared) && !is_complete(&path) {
-                    // Still being written. Leave the recorded stat alone so the
-                    // next tick sees it as a change again.
+            let snapshot = {
+                let Ok(state) = watched.0.lock() else {
                     continue;
-                }
-                {
-                    let Ok(mut state) = watched.0.lock() else {
+                };
+                state.path.clone().map(|path| {
+                    (
+                        path,
+                        state.modified,
+                        state.len,
+                        state.missing,
+                        state.sidecar_modified,
+                        state.sidecar_len,
+                        state.sidecar_missing,
+                    )
+                })
+            };
+            let Some((
+                path,
+                recorded_modified,
+                recorded_len,
+                missing,
+                sidecar_modified,
+                sidecar_len,
+                sidecar_missing,
+            )) = snapshot
+            else {
+                continue;
+            };
+
+            watch_review_sidecar(
+                &app,
+                &watched,
+                &path,
+                sidecar_modified,
+                sidecar_len,
+                sidecar_missing,
+            );
+
+            let poll = POLL_SECONDS.load(Ordering::Relaxed);
+            if !document_watch_due(poll, last_doc.elapsed()) {
+                continue;
+            }
+            last_doc = Instant::now();
+
+            match stat(&path) {
+                Some((modified, len)) => {
+                    let changed = modified != recorded_modified || len != recorded_len;
+                    let reappeared = missing;
+                    if (changed || reappeared) && !is_complete(&path) {
+                        // Still being written. Leave the recorded stat alone so the
+                        // next tick sees it as a change again.
                         continue;
-                    };
-                    if state.path.as_deref() != Some(path.as_path()) {
-                        continue; // the reader moved on while the disk answered
                     }
-                    state.modified = modified;
-                    state.len = len;
-                    state.missing = false;
+                    {
+                        let Ok(mut state) = watched.0.lock() else {
+                            continue;
+                        };
+                        if state.path.as_deref() != Some(path.as_path()) {
+                            continue; // the reader moved on while the disk answered
+                        }
+                        state.modified = modified;
+                        state.len = len;
+                        state.missing = false;
+                    }
+                    if changed || reappeared {
+                        let revision = REVISION.fetch_add(1, Ordering::Relaxed) + 1;
+                        let _ = app.emit(
+                            "file-changed",
+                            WatchEvent {
+                                kind: if reappeared { "restored" } else { "changed" },
+                                revision,
+                            },
+                        );
+                    }
                 }
-                if changed || reappeared {
-                    let revision = REVISION.fetch_add(1, Ordering::Relaxed) + 1;
+                None => {
+                    // Mid-build gap. Report it once and keep the current render.
+                    if missing {
+                        continue;
+                    }
+                    {
+                        let Ok(mut state) = watched.0.lock() else {
+                            continue;
+                        };
+                        if state.path.as_deref() != Some(path.as_path()) {
+                            continue;
+                        }
+                        state.missing = true;
+                    }
                     let _ = app.emit(
                         "file-changed",
                         WatchEvent {
-                            kind: if reappeared { "restored" } else { "changed" },
-                            revision,
+                            kind: "missing",
+                            revision: REVISION.load(Ordering::Relaxed),
                         },
                     );
                 }
-            }
-            None => {
-                // Mid-build gap. Report it once and keep the current render.
-                if missing {
-                    continue;
-                }
-                {
-                    let Ok(mut state) = watched.0.lock() else {
-                        continue;
-                    };
-                    if state.path.as_deref() != Some(path.as_path()) {
-                        continue;
-                    }
-                    state.missing = true;
-                }
-                let _ = app.emit(
-                    "file-changed",
-                    WatchEvent {
-                        kind: "missing",
-                        revision: REVISION.load(Ordering::Relaxed),
-                    },
-                );
             }
         }
     });
@@ -1437,9 +1532,13 @@ struct ReviewAt {
 struct Review {
     #[serde(default)]
     id: String,
+    #[serde(default)]
     file: String,
+    #[serde(default)]
     kind: String,
+    #[serde(default)]
     at: ReviewAt,
+    #[serde(default)]
     quote: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     comment: String,
@@ -1447,8 +1546,14 @@ struct Review {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ReviewFile {
+    #[serde(default = "review_format_2")]
     format: u32,
+    #[serde(default)]
     reviews: Vec<Review>,
+}
+
+fn review_format_2() -> u32 {
+    2
 }
 
 fn empty_store() -> ReviewFile {
@@ -1520,16 +1625,74 @@ fn drop_redundant_end(review: &mut Review) {
 }
 
 fn parse_store(text: &str) -> Result<ReviewFile, String> {
-    if text.trim().is_empty() {
+    let trimmed = text.trim_start_matches('\u{feff}').trim();
+    if trimmed.is_empty() {
         return Ok(empty_store());
     }
-    let mut parsed: ReviewFile = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    let parsed: ReviewFile = serde_json::from_str(trimmed)
+        .or_else(|_| serde_json::from_str(&strip_trailing_commas(trimmed)))
+        .map_err(|error| error.to_string())?;
     if parsed.format != 1 && parsed.format != 2 {
         return Err("unsupported review format".into());
     }
+    let mut parsed = parsed;
     ensure_ids(&mut parsed.reviews);
     parsed.format = 2;
     Ok(parsed)
+}
+
+/// Agents often leave a trailing comma. serde_json will not.
+fn strip_trailing_commas(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_string {
+            out.push(ch);
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == ',' {
+            let mut next = i + 1;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            if next < chars.len() && (chars[next] == '}' || chars[next] == ']') {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+fn adopt_reviews(store: &mut ReviewFile, basename: &str, kind: &str) {
+    for review in &mut store.reviews {
+        if review.file.is_empty() {
+            review.file = basename.to_string();
+        }
+        if review.kind.is_empty() {
+            review.kind = kind.to_string();
+        }
+    }
 }
 
 fn ensure_ids(reviews: &mut [Review]) {
@@ -1589,6 +1752,9 @@ fn load_store(doc_path: &Path) -> Result<(PathBuf, ReviewFile), String> {
     } else {
         empty_store()
     };
+    if let Ok(basename) = document_basename(doc_path) {
+        adopt_reviews(&mut store, &basename, kind_for(doc_path));
+    }
     let legacy = doc_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -1617,7 +1783,7 @@ fn reviews_for_file(store: ReviewFile, basename: &str) -> ReviewFile {
         reviews: store
             .reviews
             .into_iter()
-            .filter(|review| review.file == basename)
+            .filter(|review| review.file.is_empty() || review.file == basename)
             .collect(),
     }
 }
@@ -2407,7 +2573,8 @@ fn main() {
             append_review,
             read_reviews,
             update_review,
-            delete_review
+            delete_review,
+            reduce_pdf
         ])
         .setup(move |app| {
             if let Some(seconds) = launch.poll {
@@ -2481,9 +2648,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        change_review_comment, list_reviews, natural_key, open_download, open_link, parse_cli,
-        parse_store, remove_review, render_markdown, sidecar_ready, write_review, Cli, Review,
-        ReviewAt, Target,
+        change_review_comment, document_watch_due, list_reviews, natural_key, open_download,
+        open_link, parse_cli, parse_store, reduced_pdf_path, remove_review, render_markdown,
+        shrink_pdf_bytes, sidecar_ready, write_review, Cli, Review, ReviewAt, Target,
     };
     use std::collections::HashSet;
     use std::ffi::OsString;
@@ -2635,6 +2802,27 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reduced_pdf_path_sits_beside_the_source() {
+        let path = PathBuf::from("/papers/wake.pdf");
+        assert_eq!(
+            reduced_pdf_path(&path).unwrap(),
+            PathBuf::from("/papers/wake_reduced.pdf")
+        );
+        let windows = PathBuf::from(r"C:\a\b.pdf");
+        assert_eq!(
+            reduced_pdf_path(&windows).unwrap().file_name().unwrap(),
+            "b_reduced.pdf"
+        );
+    }
+
+    #[test]
+    fn shrink_pdf_bytes_never_grows_a_minimal_pdf() {
+        let input = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n";
+        let out = shrink_pdf_bytes(input);
+        assert!(out.len() <= input.len());
     }
 
     #[test]
@@ -3143,5 +3331,26 @@ mod tests {
         assert!(parse_store("{\"format\":2,\"reviews\":[").is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn document_poll_off_does_not_block_sidecar_ticks() {
+        use std::time::Duration;
+        assert!(!document_watch_due(0, Duration::from_secs(30)));
+        assert!(document_watch_due(1, Duration::from_secs(1)));
+        assert!(!document_watch_due(2, Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn parse_store_accepts_agent_json() {
+        let store = parse_store(
+            "{\n  \"reviews\": [\n    {\n      \"id\": \"r1\",\n      \"quote\": \"three words here\",\n      \"at\": { \"page\": 1 },\n      \"comment\": \"fix\"\n    },\n  ]\n}\n",
+        )
+        .unwrap();
+        assert_eq!(store.format, 2);
+        assert_eq!(store.reviews.len(), 1);
+        assert_eq!(store.reviews[0].id, "r1");
+        assert_eq!(store.reviews[0].comment, "fix");
+        assert_eq!(store.reviews[0].quote, "three words here");
     }
 }

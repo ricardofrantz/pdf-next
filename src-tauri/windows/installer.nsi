@@ -323,8 +323,11 @@ Function PageReinstallUpdateSelection
 FunctionEnd
 Function PageLeaveReinstall
   ; Passive has no radio buttons. Overwrite; do not run the old uninstaller.
+  ; Treat as /UPDATE so shortcuts are left alone — recreating the .lnk
+  ; drops the user's taskbar pin.
   ${If} $PassiveMode = 1
   ${AndIf} $WixMode <> 1
+    StrCpy $UpdateMode 1
     Goto reinst_done
   ${EndIf}
 
@@ -547,6 +550,11 @@ Function .onInit
     Call RestorePreviousInstallLocation
   ${EndIf}
 
+  ; Same folder already has the app — treat as /UPDATE so we never run the
+  ; unpin/delete-shortcut path. Rewriting the Start Menu .lnk drops pins.
+  ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+    StrCpy $UpdateMode 1
+  ${EndIf}
 
   !if "${INSTALLMODE}" == "both"
     !insertmacro MULTIUSER_INIT
@@ -990,6 +998,21 @@ Function CreateOrUpdateStartMenuShortcut
     Return
   ${EndIf}
 
+  ; Already points at this install — leave the .lnk alone. Rewriting it
+  ; clears the user's taskbar pin of that shortcut.
+  !if "${STARTMENUFOLDER}" != ""
+    !insertmacro IsShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    Pop $0
+    ${If} $0 = 1
+      Return
+    ${EndIf}
+  !endif
+  !insertmacro IsShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+  Pop $0
+  ${If} $0 = 1
+    Return
+  ${EndIf}
+
   ; Skip creating shortcut if in update mode or no shortcut mode
   ; but always create if migrating from wix
   ${If} $WixMode = 0
@@ -1016,6 +1039,13 @@ Function CreateOrUpdateDesktopShortcut
   Pop $0
   ${If} $0 = 1
     !insertmacro SetShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    Return
+  ${EndIf}
+
+  ; Already correct — rewriting the .lnk would drop a taskbar pin of it.
+  !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+  Pop $0
+  ${If} $0 = 1
     Return
   ${EndIf}
 

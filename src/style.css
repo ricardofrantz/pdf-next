@@ -525,7 +525,7 @@ body.review-open #markdownStage {
   color: var(--fg-dim);
 }
 
-.review-quote {
+.review-row > .review-quote {
   margin: 0;
   font-size: 1em;
   line-height: 1.35;
@@ -583,13 +583,31 @@ body.review-open #markdownStage {
   --review-line: var(--review-6-line);
 }
 
-/* Wash only. Never change the typeface — wrapping PDF.js spans in <mark>
-   used to swap the font and make the line unreadable. */
+/* Wash only. Never change the typeface. PDF uses <review-q> (not span):
+   PDF.js forces every textLayer span to position:absolute, so a nested
+   span's background covered the whole sentence. Markdown uses mark.review. */
 .review-block,
-.textLayer span.review {
+.textLayer span.review,
+.textLayer review-q,
+mark.review {
   background-color: var(--review-fill);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
+}
+
+mark.review,
+.textLayer review-q {
+  color: inherit;
+  font: inherit;
+  font-size: inherit;
+  font-family: inherit;
+  font-weight: inherit;
+  font-style: inherit;
+  letter-spacing: inherit;
+  line-height: inherit;
+  position: static;
+  display: inline;
+  transform: none;
 }
 
 .review-block {
@@ -729,11 +747,13 @@ body.image-turned #image {
 
 /* Wrapping the window around the content means exactly that: no padding, and
    no ring — the window frame is the edge of the picture now. */
-body.wrap-on #imageStage {
+body.wrap-on #imageStage,
+body.hug #imageStage {
   padding: 0;
 }
 
-body.wrap-on #image {
+body.wrap-on #image,
+body.hug #image {
   box-shadow: none;
 }
 
