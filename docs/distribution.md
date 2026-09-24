@@ -4,6 +4,39 @@ Every tag `v*` builds and publishes installers for Windows, macOS and Linux.
 This page is the rest: how the Windows builds get a signature, and how each
 package manager — winget, the Microsoft Store, Homebrew, apt — is fed.
 
+## Build the Windows installer from Linux/WSL
+
+The Windows NSIS installer can be built without Windows: the Rust code is
+cross-compiled for `x86_64-pc-windows-msvc`, linked with LLVM `lld`, and
+packed with `makensis`. Only the NSIS installer works this way; the MSI does
+not.
+
+Packages (Debian/Ubuntu):
+
+```
+sudo apt-get install -y nsis lld llvm clang
+```
+
+One-time setup:
+
+```
+rustup target add x86_64-pc-windows-msvc
+cargo install --locked cargo-xwin
+```
+
+Build, from the repository root:
+
+```
+XWIN_ACCEPT_LICENSE=1 CFLAGS="-DHAVE_INTRIN_H" bun run build -- --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+```
+
+`XWIN_ACCEPT_LICENSE=1` accepts Microsoft's license for the CRT and SDK
+files the cross toolchain downloads on first use. `CFLAGS="-DHAVE_INTRIN_H"`
+works around a mozjpeg-sys quirk: it enables `_BitScanForward64` for MSVC
+targets but only includes `<intrin.h>` when that macro is set, which MSVC
+tolerates and clang-cl does not. The installer lands at
+`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/pdf-next_<version>_x64-setup.exe`.
+
 ## Code signing on Windows (Azure Trusted Signing)
 
 The release workflow signs the `.exe`, the `.msi` and the binary inside them
