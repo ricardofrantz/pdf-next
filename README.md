@@ -9,7 +9,7 @@ without touching anything.
 [![GitHub](https://img.shields.io/badge/github-pdf--next-blue)](https://github.com/ricardofrantz/pdf-next)
 
 It is the desktop sibling of [vscode-pdf Next](https://github.com/ricardofrantz/vscode-pdf-next)
-and shares its rendering approach: the latest Mozilla PDF.js (`pdfjs-dist@6.2.108`) parsing in a
+and shares its rendering approach: Mozilla PDF.js (`pdfjs-dist@6.2.108`) parsing in a
 real worker thread, dark reading modes that recolour pages instead of filtering them, and reload
 that survives a build deleting and recreating the file mid-compile.
 
@@ -25,6 +25,9 @@ that survives a build deleting and recreating the file mid-compile.
   exclusive lock, so simply opening it fails; on macOS and Linux nothing stops you reading a
   partial file, so PDFs are also checked for their `%%EOF` trailer. If it is not ready, the
   reload waits for the next tick.
+- **Leaves the PDF available to build tools.** The viewer keeps PDF bytes in memory and
+  closes the source file after reading. You can overwrite, replace, or delete it while
+  it is displayed. Release smoke tests check those operations in the running viewer.
 - **Fits the window to the document.** Open a paper and the window becomes the size of the page
   itself, centred; open a wide figure and the window is wide. It only happens when you open a
   file — rebuilds never move your window. With no file open, it stays a small drop target.

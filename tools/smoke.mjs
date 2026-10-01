@@ -1,4 +1,4 @@
-// Open every fixture in the built viewer and check that it drew something.
+// Open every fixture in the built viewer and check rendering and file access.
 //
 // The gap this closes: a Tauri app is two programs. `cargo build` proves the
 // Rust half compiles and `tauri build` proves a bundle can be made, but
@@ -10,9 +10,12 @@
 // first blank window.
 
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import {
+  closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync,
+  readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const target = join(root, 'src-tauri', 'target');
@@ -54,11 +57,13 @@ function findBinary() {
 /// Run the viewer on one file and return what it said.
 function open(binary, file, seconds) {
   return new Promise((resolvePromise) => {
+    const checkFile = /\.pdf$/i.test(file);
     const child = spawn(binary, [file, '--no-focus'], {
       env: {
         ...process.env,
         PDF_NEXT_SMOKE: '1',
         PDF_NEXT_SMOKE_TIMEOUT: String(seconds),
+        PDF_NEXT_SMOKE_HOLD: checkFile ? '1' : '0',
         // WebKitGTK picks a GPU path that no build server has.
         WEBKIT_DISABLE_COMPOSITING_MODE: '1',
         WEBKIT_DISABLE_DMABUF_RENDERER: '1',
@@ -67,7 +72,42 @@ function open(binary, file, seconds) {
     });
 
     let output = '';
-    child.stdout.on('data', (chunk) => (output += chunk));
+    let checked = false;
+    let checking = false;
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+      if (!checkFile || checking || !/^smoke: ready .+\n/m.test(output)) {
+        return;
+      }
+      checking = true;
+      try {
+        if (!child.kill(0)) {
+          throw new Error('viewer exited before the source-file checks');
+        }
+        const bytes = readFileSync(file);
+        // The app is still displaying this copied fixture during these operations.
+        const writable = openSync(file, 'r+');
+        try {
+          writeSync(writable, bytes, 0, 1, 0);
+        } finally {
+          closeSync(writable);
+        }
+        const replacement = `${file}.replacement`;
+        writeFileSync(replacement, bytes);
+        renameSync(replacement, file);
+        unlinkSync(file);
+        writeFileSync(file, bytes);
+        checked = true;
+        output = output.replace(/^smoke: ready (.+)$/m,
+          'smoke: ok $1; source writable, replaceable, and removable');
+      } catch (error) {
+        output = output.replace(/^smoke: ready .+$/m, `smoke: fail source-file check: ${error}`);
+      }
+      if (!child.kill('SIGTERM')) {
+        checked = false;
+        output += '\nsmoke: fail viewer exited during the source-file checks\n';
+      }
+    });
     child.stderr.on('data', (chunk) => (output += chunk));
 
     // Longer than the app's own watchdog, so a hung *process* is still caught
@@ -79,7 +119,11 @@ function open(binary, file, seconds) {
     });
     child.on('close', (code) => {
       clearTimeout(kill);
-      resolvePromise({ code, output });
+      if (checkFile && !checking) {
+        output += '\nsmoke: fail source-file checks did not run\n';
+      }
+      const passed = checked && !/^smoke: fail\b/m.test(output);
+      resolvePromise({ code: checkFile ? (passed ? 0 : -1) : code, output });
     });
   });
 }
@@ -100,22 +144,33 @@ const seconds = Number(process.env.PDF_NEXT_SMOKE_TIMEOUT || 90);
 console.log(`smoke: ${binary}\n`);
 
 let failed = 0;
-for (const file of files) {
-  const { code, output } = await open(binary, file, seconds);
-  const verdict = output.split('\n').find((line) => line.startsWith('smoke:')) || '';
-  if (code === 0 && verdict.startsWith('smoke: ok')) {
-    console.log(`  PASS  ${file}\n        ${verdict}`);
-  } else {
-    failed += 1;
-    console.log(`  FAIL  ${file}  (exit ${code})`);
-    console.log(
-      output
-        .trimEnd()
-        .split('\n')
-        .map((line) => `        ${line}`)
-        .join('\n'),
-    );
+mkdirSync(join(root, 'scratch'), { recursive: true });
+const copies = mkdtempSync(join(root, 'scratch', 'smoke-fixtures-'));
+try {
+  for (const file of files) {
+    let opened = file;
+    if (/\.pdf$/i.test(file)) {
+      opened = join(copies, basename(file));
+      copyFileSync(file, opened);
+    }
+    const { code, output } = await open(binary, opened, seconds);
+    const verdict = output.split('\n').find((line) => line.startsWith('smoke:')) || '';
+    if (code === 0 && verdict.startsWith('smoke: ok')) {
+      console.log(`  PASS  ${file}\n        ${verdict}`);
+    } else {
+      failed += 1;
+      console.log(`  FAIL  ${file}  (exit ${code})`);
+      console.log(
+        output
+          .trimEnd()
+          .split('\n')
+          .map((line) => `        ${line}`)
+          .join('\n'),
+      );
+    }
   }
+} finally {
+  rmSync(copies, { recursive: true, force: true });
 }
 
 console.log(`\n${files.length - failed}/${files.length} rendered`);

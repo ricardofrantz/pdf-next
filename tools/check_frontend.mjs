@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
+import { EventEmitter } from 'node:events';
 import { findNormalizedSpan, reviewLabel } from '../src/review-label.mjs';
 import { mapCollapsedIndex, reconcilePendingComment } from '../src/review-sync.mjs';
 import {
@@ -21,6 +22,7 @@ const version = await readFile('src/vendor/PDFJS_VERSION', 'utf8');
 const readme = await readFile('README.md', 'utf8');
 const page = await readFile('src/index.html', 'utf8');
 const smoke = await readFile('src/smoke.mjs', 'utf8');
+const smokeHarness = await readFile('tools/smoke.mjs', 'utf8');
 const nsisTemplate = await readFile('src-tauri/windows/installer.nsi', 'utf8');
 const releaseWorkflow = await readFile('.github/workflows/release.yml', 'utf8');
 assert.match(releaseWorkflow, /run: node tools\/check_frontend\.mjs/,
@@ -29,12 +31,37 @@ assert.match(releaseWorkflow, /run: cargo test --locked/,
   'Release builds must run Rust regressions before publishing.');
 
 // Exercise the app functions with controlled IPC completion order.
-function appFunction(name, next, context) {
+function appFunction(name, next, context, source = app) {
   const pattern = new RegExp(`(?:async )?function ${name}\\(`);
-  const start = app.search(pattern);
-  const end = app.indexOf(`\n${next}`, start);
+  const start = source.search(pattern);
+  const end = source.indexOf(`\n${next}`, start);
   assert.ok(start >= 0 && end > start, `Could not locate ${name}.`);
-  return runInNewContext(`${app.slice(start, end)}\n${name}`, context);
+  return runInNewContext(`${source.slice(start, end)}\n${name}`, context);
+}
+
+{
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = (signal) => {
+    if (signal === 'SIGTERM') {
+      queueMicrotask(() => {
+        child.stdout.emit('data', '\nsmoke: fail watchdog expired\n');
+        child.emit('close', 1);
+      });
+    }
+    return true;
+  };
+  const open = appFunction('open', 'const binary = findBinary();', {
+    spawn: () => child, process: { env: {} },
+    readFileSync: () => Uint8Array.of(37), openSync: () => 1,
+    closeSync() {}, writeSync() {}, writeFileSync() {}, renameSync() {}, unlinkSync() {},
+    setTimeout: () => 1, clearTimeout() {},
+  }, smokeHarness);
+  const running = open('viewer', 'fixture.pdf', 90);
+  child.stdout.emit('data', 'smoke: ready fixture rendered\n');
+  const result = await running;
+  assert.notEqual(result.code, 0, 'An explicit viewer failure after readiness must fail the smoke gate.');
 }
 
 {

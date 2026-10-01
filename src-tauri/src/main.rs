@@ -2489,9 +2489,16 @@ fn smoke_finish(ok: bool, detail: &str) -> ! {
 /// The frontend's verdict on the launch file: did it render, and what went
 /// wrong if it did not. Reachable in a normal run too, where it does nothing,
 /// because the frontend only calls it when `launch.smoke` said to.
+/// PDF_NEXT_SMOKE_HOLD keeps it running for external source-file checks.
 #[tauri::command]
 fn smoke_report(ok: bool, detail: String, launch: State<'_, Launch>) {
     if !launch.smoke {
+        return;
+    }
+    if ok && std::env::var("PDF_NEXT_SMOKE_HOLD").as_deref() == Ok("1") {
+        use std::io::Write;
+        println!("smoke: ready {detail}");
+        let _ = std::io::stdout().flush();
         return;
     }
     smoke_finish(ok, &detail);
