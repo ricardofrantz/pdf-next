@@ -1785,7 +1785,9 @@ fn save_store(sidecar: &Path, store: &ReviewFile) -> Result<(), String> {
     temp.as_file()
         .sync_all()
         .map_err(|error| error.to_string())?;
-    temp.persist(sidecar).map_err(|error| error.to_string())?;
+    // std::fs::rename can replace an open destination on modern Windows.
+    let temp = temp.into_temp_path();
+    std::fs::rename(&temp, sidecar).map_err(|error| error.to_string())?;
     Ok(())
 }
 
