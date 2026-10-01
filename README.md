@@ -9,11 +9,14 @@ without touching anything.
 [![GitHub](https://img.shields.io/badge/github-pdf--next-blue)](https://github.com/ricardofrantz/pdf-next)
 
 It is the desktop sibling of [vscode-pdf Next](https://github.com/ricardofrantz/vscode-pdf-next)
-and shares its rendering approach: Mozilla PDF.js (`pdfjs-dist@6.2.108`) parsing in a
+and shares its rendering approach: Mozilla PDF.js (`pdfjs-dist@6.3.289`) parsing in a
 real worker thread, dark reading modes that recolour pages instead of filtering them, and reload
 that survives a build deleting and recreating the file mid-compile.
 
 ## What it does
+
+- **Sharp rendering on high-density displays.** Pages refresh when display density changes.
+  At high zoom, detail rendering skips off-screen drawing operations to reduce scrolling work.
 
 - **Watches your file, on by default.** Rebuild the PDF and the view updates within a second,
   keeping your page, scroll position and zoom. The interval is in the toolbar — 1s, 2s, 3s, or
@@ -100,7 +103,7 @@ that survives a build deleting and recreating the file mid-compile.
   sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
   same size follows the first one, as it does in every other viewer. If the machine has nothing
   to print to — no printer, or a stopped print service — it says so rather than opening nothing.
-- **The title says which build you are running** — `paper.pdf — pdf-next 0.13.1` — so a bug report
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.13.2` — so a bug report
   can name a version without hunting for an about box.
 - **Tells you when there is a newer version.** A few seconds after launch the app asks
   GitHub for the latest release, once; if it is newer, the last toolbar button lights up and a

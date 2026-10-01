@@ -1,4 +1,5 @@
-Version: 6.2.108
-Source: pdfjs-dist@6.2.108
-Integrity: sha512-YxFb+SQcodN2rnX9Tn3dHYlqfb7NjlzzfONPpJd+AKoKtUjEdevTfbC07d5TcczzOK6261auRkP/M8OBHs9vFQ==
-Date: 2026-08-10T22:00:38.520Z
+Version: 6.3.289
+Source: pdfjs-dist@6.3.289
+Integrity: sha512-ZHjSVpDa3D6izMq8/04lvkhkATUmL9px6ChPaXc1k6nU2Mrhlg1/7F0bdUqCwUjw3NsPTfPZsMDUU6ZIcRaeQw==
+Date: 2026-10-01
+Patches: page cache size 3; detail canvas uses CSS-rounded page dimensions; canceled renders do not cache incomplete operation bounds

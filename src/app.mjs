@@ -191,6 +191,7 @@ const pdfViewer = new TidyViewer({
   linkService,
   findController,
   maxCanvasPixels: MAX_CANVAS_PIXELS,
+  enableOptimizedPartialRendering: true,
   textLayerMode: 1,
   annotationMode: 1,
 });
@@ -3831,6 +3832,95 @@ async function settles(test, ms = 20_000) {
   return test();
 }
 
+function sharpPdfViewport(view) {
+  const rendered = view?.detailView || view;
+  const canvas = rendered?.canvas;
+  if (rendered?.renderingState !== 3 || !canvas || canvas.hidden) {
+    return false;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const page = view.div.getBoundingClientRect();
+  const bounds = ui.container.getBoundingClientRect();
+  const visible = {
+    left: bounds.left + ui.container.clientLeft,
+    top: bounds.top + ui.container.clientTop,
+  };
+  visible.right = visible.left + ui.container.clientWidth;
+  visible.bottom = visible.top + ui.container.clientHeight;
+  const density = window.devicePixelRatio || 1;
+  const left = Math.max(page.left, visible.left);
+  const top = Math.max(page.top, visible.top);
+  const right = Math.min(page.right, visible.right);
+  const bottom = Math.min(page.bottom, visible.bottom);
+  return right > left && bottom > top && rect.width > 0 && rect.height > 0 &&
+    rect.left <= left + 2 && rect.top <= top + 2 &&
+    rect.right >= right - 2 && rect.bottom >= bottom - 2 &&
+    canvas.width >= Math.floor(rect.width * density) - 2 &&
+    canvas.height >= Math.floor(rect.height * density) - 2;
+}
+
+async function smokePdfScroll() {
+  const view = pdfViewer.getPageView(0);
+  const start = ui.container.scrollTop + view.div.getBoundingClientRect().top -
+    ui.container.getBoundingClientRect().top;
+  const metrics = { density: window.devicePixelRatio || 1, scrollMs: [], renderMs: [], hashes: [] };
+  const starts = new Map();
+  const onRender = ({ source }) => starts.set(source, performance.now());
+  const onRendered = ({ source, error }) => {
+    if (error) {
+      failures.push(`PDF render failed: ${error}`);
+    }
+    if (starts.has(source)) {
+      metrics.renderMs.push(Math.round(performance.now() - starts.get(source)));
+      starts.delete(source);
+    }
+  };
+  eventBus.on('pagerender', onRender);
+  eventBus.on('pagerendered', onRendered);
+  try {
+    for (const fraction of [0, 0.3, 0.6, 0.3, 0]) {
+      const began = performance.now();
+      ui.container.scrollTop = Math.max(0, start + view.viewport.height * fraction);
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      pdfViewer.update();
+      if (!await settles(() => sharpPdfViewport(view))) {
+        const rendered = view.detailView || view;
+        throw new Error(`PDF stayed unsharp after scrolling to ${fraction}: ${JSON.stringify({
+          density: metrics.density, state: rendered.renderingState,
+          width: rendered.canvas?.width, height: rendered.canvas?.height,
+          canvas: rendered.canvas?.getBoundingClientRect(),
+          page: view.div.getBoundingClientRect(), visible: ui.container.getBoundingClientRect(),
+          completed: metrics,
+        })}`);
+      }
+      metrics.scrollMs.push(Math.round(performance.now() - began));
+      const canvas = (view.detailView || view).canvas;
+      const rect = canvas.getBoundingClientRect();
+      const visible = ui.container.getBoundingClientRect();
+      const density = window.devicePixelRatio || 1;
+      const x = Math.max(0, Math.floor((Math.max(rect.left, visible.left) - rect.left) * density));
+      const y = Math.max(0, Math.floor((Math.max(rect.top, visible.top) - rect.top) * density));
+      const pixels = canvas.getContext('2d').getImageData(x, y,
+        Math.min(256, canvas.width - x), Math.min(256, canvas.height - y)).data;
+      let hash = 2166136261;
+      for (const byte of pixels) {
+        hash = Math.imul(hash ^ byte, 16777619) >>> 0;
+      }
+      metrics.hashes.push(hash.toString(16));
+    }
+    if (metrics.hashes[0] !== metrics.hashes[4] || metrics.hashes[1] !== metrics.hashes[3]) {
+      throw new Error('PDF pixels changed after scrolling away and back');
+    }
+    if (state.file?.name === 'dense-page.pdf' && new Set(metrics.hashes).size < 2) {
+      throw new Error('Dense PDF pixels did not change while scrolling');
+    }
+    return metrics;
+  } finally {
+    eventBus.off('pagerender', onRender);
+    eventBus.off('pagerendered', onRendered);
+  }
+}
+
 /// Report to the build server whether this launch works, then let it end the
 /// process. Only ever runs under PDF_NEXT_SMOKE; a reader never gets here.
 async function reportSmoke() {
@@ -3863,27 +3953,40 @@ async function reportSmoke() {
       // Cross the canvas cap even on a 1x runner. A painted low-resolution
       // base without a completed detail canvas must not count as sharp.
       let sharp = false;
+      const scroll = [];
       if (painted) {
         pdfViewer.currentScaleValue = '6';
-        sharp = await settles(() => {
-          const view = pdfViewer.getPageView(0);
-          const rendered = view?.detailView || view;
-          const canvas = rendered?.canvas;
-          if (rendered?.renderingState !== 3 || !canvas || canvas.hidden) {
-            return false;
+        sharp = await settles(() => sharpPdfViewport(pdfViewer.getPageView(0)));
+        if (sharp) {
+          scroll.push(await smokePdfScroll());
+          if (file.name === 'dense-page.pdf') {
+            const descriptor = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+            try {
+              // Exercise PDF.js density changes even when CI has a 1x screen.
+              for (const density of [2, 3]) {
+                Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: density });
+                window.dispatchEvent(new Event('resize'));
+                if (!await settles(() => sharpPdfViewport(pdfViewer.getPageView(0)))) {
+                  throw new Error(`PDF stayed unsharp at ${density}x density`);
+                }
+                scroll.push(await smokePdfScroll());
+              }
+            } finally {
+              if (descriptor) {
+                Object.defineProperty(window, 'devicePixelRatio', descriptor);
+              } else {
+                delete window.devicePixelRatio;
+              }
+              window.dispatchEvent(new Event('resize'));
+            }
           }
-          const rect = canvas.getBoundingClientRect();
-          const density = window.devicePixelRatio || 1;
-          return rect.width > 0 && rect.height > 0 &&
-            canvas.width >= Math.floor(rect.width * density) - 2 &&
-            canvas.height >= Math.floor(rect.height * density) - 2;
-        });
+        }
       }
       const ok = pages > 0 && painted && sharp && failures.length === 0;
       await invoke('smoke_report', {
         ok,
         detail: ok
-          ? `${file.name} rendered sharply at 600%, ${pages} page${pages === 1 ? '' : 's'}`
+          ? `${file.name} rendered sharply at 600%, ${pages} page${pages === 1 ? '' : 's'}; scroll=${JSON.stringify(scroll)}`
           : `${file.name} did not render sharply: ${pages} pages, painted=${painted}, sharp=${sharp}${note()}`,
       });
       return;

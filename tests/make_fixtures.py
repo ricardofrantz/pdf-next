@@ -4,7 +4,10 @@
 The fixtures are committed, so a build server needs nothing to run the test.
 This script is how they are made again if they must change. Each file is
 written by hand rather than by a library, so the bytes stay small and stable
-and the repository gains no dependency.
+and the repository gains no dependency. Image codestreams come from Mozilla's
+Apache-2.0 regression tests at tag v6.3.289: jbig2_symbol_offset.pdf and
+jp2k-resetprob.pdf in https://github.com/mozilla/pdf.js/tree/v6.3.289/test/pdfs.
+Their license is in src/vendor/pdfjs/LICENSE.
 """
 
 from __future__ import annotations
@@ -93,6 +96,46 @@ def stored_zlib(data: bytes) -> bytes:
     return bytes(out)
 
 
+def dense_page() -> bytes:
+    """Text, transparent fills, and curves throughout a page for scroll tests."""
+    commands = []
+    for y in range(0, 842, 8):
+        for x in range(0, 595, 12):
+            commands.append(
+                f"q /GS1 gs 0.2 0.4 0.8 rg {x} {y} 9 5 re f Q\n"
+                f"0.1 0.2 0.3 RG 0.5 w {x} {y} m "
+                f"{x + 2} {y + 6} {x + 6} {y + 6} {x + 9} {y} c S\n"
+            )
+        commands.append(f"BT /F1 6 Tf 3 {y + 1} Td (Scroll render {y}) Tj ET\n")
+    stream = "".join(commands).encode("ascii")
+    return pdf([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+        b"/Resources << /Font << /F1 3 0 R >> "
+        b"/ExtGState << /GS1 << /Type /ExtGState /ca 0.5 >> >> >> /Contents 5 0 R >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"endstream",
+    ])
+
+
+def image_page(name: str, decoder: str, width: int, height: int, bits: int,
+               colour: str) -> bytes:
+    """Draw an encoded test image over an A4 page to exercise decoder loading."""
+    image = (HERE / name).read_bytes()
+    stream = b"q 595 0 0 842 0 0 cm /Im1 Do Q\n"
+    return pdf([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+        b"/Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"endstream",
+        (f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} "
+         f"/BitsPerComponent {bits} /ColorSpace /{colour} /Filter /{decoder} "
+         f"/Length {len(image)} >>\nstream\n").encode("ascii") + image + b"\nendstream",
+    ])
+
+
 def png(width: int = 64, height: int = 48) -> bytes:
     """A small truecolour PNG holding a gradient, not a flat fill.
 
@@ -142,6 +185,9 @@ def main() -> None:
     written = {
         "hello.pdf": one_page("pdf-next smoke test"),
         "three-pages.pdf": one_page("page", pages=3),
+        "dense-page.pdf": dense_page(),
+        "jbig2.pdf": image_page("jbig2.bin", "JBIG2Decode", 132, 14, 1, "DeviceGray"),
+        "jpeg2000.pdf": image_page("jpx.bin", "JPXDecode", 40, 27, 8, "DeviceRGB"),
         "swatch.png": png(),
         "notes.md": MARKDOWN.encode("utf-8"),
     }

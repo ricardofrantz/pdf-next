@@ -19,6 +19,8 @@ const main = await readFile('src-tauri/src/main.rs', 'utf8');
 const config = JSON.parse(await readFile('src-tauri/tauri.conf.json', 'utf8'));
 const styles = await readFile('src/style.css', 'utf8');
 const version = await readFile('src/vendor/PDFJS_VERSION', 'utf8');
+const pdfCoreSource = await readFile('src/vendor/pdfjs/build/pdf.min.mjs', 'utf8');
+const pdfViewerSource = await readFile('src/vendor/pdfjs/web/pdf_viewer.mjs', 'utf8');
 const readme = await readFile('README.md', 'utf8');
 const page = await readFile('src/index.html', 'utf8');
 const smoke = await readFile('src/smoke.mjs', 'utf8');
@@ -29,6 +31,157 @@ assert.match(releaseWorkflow, /run: node tools\/check_frontend\.mjs/,
   'Release builds must run frontend regressions before publishing.');
 assert.match(releaseWorkflow, /run: cargo test --locked/,
   'Release builds must run Rust regressions before publishing.');
+
+// A sharp canvas at the old scroll position must not satisfy the render gate.
+{
+  const viewport = { left: 0, top: 100, right: 400, bottom: 500 };
+  let rect = { left: 0, top: 0, right: 400, bottom: 400, width: 400, height: 400 };
+  const canvas = { width: 800, height: 800, hidden: false,
+    getBoundingClientRect: () => rect };
+  const view = { renderingState: 3, canvas,
+    div: { getBoundingClientRect: () => ({ left: 0, top: 0, right: 400, bottom: 900 }) } };
+  const sharp = appFunction('sharpPdfViewport', 'async function smokePdfScroll', {
+    ui: { container: { getBoundingClientRect: () => viewport,
+      clientLeft: 0, clientTop: 0, clientWidth: 400, clientHeight: 400 } },
+    window: { devicePixelRatio: 2 },
+  });
+  assert.equal(sharp(view), false, 'A sharp canvas that misses visible content must fail.');
+  rect = { ...rect, top: 100, bottom: 500 };
+  assert.equal(sharp(view), true);
+  canvas.width = 400;
+  assert.equal(sharp(view), false, 'A CSS-scaled low-resolution canvas must fail.');
+  canvas.width = 800;
+  view.detailView = { renderingState: 1, canvas };
+  assert.equal(sharp(view), false, 'An unfinished detail render must fail.');
+}
+
+// Run the vendored detail view against a page rounded down by CSS. Percentages
+// based on the unrounded viewport would shrink and displace the sharp crop.
+{
+  const source = pdfViewerSource.slice(
+    pdfViewerSource.indexOf('class PDFPageDetailView extends BasePDFPageView'),
+    pdfViewerSource.indexOf(';// ./web/struct_tree_layer_builder.js'),
+  );
+  const canvas = { style: {} };
+  class Base {
+    constructor(page) { this.div = page.div; this.renderingState = 0; }
+    get renderingState() { return this.state; }
+    set renderingState(value) { this.state = value; }
+    cancelRendering() {}
+    _resetCanvas() {}
+    _createCanvas() { return { canvas, prevCanvas: null }; }
+    _drawCanvas() { return Promise.resolve(); }
+    dispatchPageRender() {}
+  }
+  const Detail = runInNewContext(`${source}\nPDFPageDetailView`, {
+    BasePDFPageView: Base,
+    RenderingStates: { INITIAL: 0, RUNNING: 1, FINISHED: 3, PAUSED: 2 },
+    OutputScale: { pixelRatio: 3, capPixels: (pixels) => pixels },
+  });
+  const page = {
+    div: { clientWidth: 4758, clientHeight: 6732, setAttribute() {} },
+    viewport: { width: 4760, height: 6736, scale: 6 },
+    maxCanvasPixels: 4_194_304, pdfPage: {},
+    _ensureCanvasWrapper: () => ({}), _getRenderingContext: () => ({}),
+  };
+  page.detailView = new Detail({ pageView: page });
+  page.detailView.update({ visibleArea: { minX: 0, minY: 3366, maxX: 793, maxY: 4488 } });
+  await page.detailView.draw();
+  assert.ok(Math.abs(parseFloat(canvas.style.width) / 100 * page.div.clientWidth - 793) < 0.01,
+    'The cropped canvas must cover the visible width of a CSS-rounded page.');
+  assert.ok(Math.abs(parseFloat(canvas.style.top) / 100 * page.div.clientHeight - 3366) < 0.01,
+    'The cropped canvas must start at the actual visible scroll offset.');
+  page.div.clientWidth = page.div.clientHeight = 0;
+  page.detailView.renderingState = 0;
+  await page.detailView.draw();
+  assert.ok(Number.isFinite(parseFloat(canvas.style.width)),
+    'A queued draw for a hidden page must not produce infinite CSS dimensions.');
+  page.div.clientWidth = 4758;
+  page.div.clientHeight = 6732;
+  page.detailView.enableOptimizedPartialRendering = true;
+  page.pdfPage.recordedBBoxes = {
+    isEmpty: (index) => index === 0,
+    minX: () => 0,
+    maxX: () => 1,
+    minY: (index) => index === 2 ? 0 : 0.5,
+    maxY: (index) => index === 2 ? 0.1 : 0.6,
+  };
+  const context = page.detailView._getRenderingContext(canvas, null);
+  assert.equal(context.operationsFilter(0), false);
+  assert.equal(context.operationsFilter(1), true, 'Visible PDF drawing operations must remain.');
+  assert.equal(context.operationsFilter(2), false, 'Off-screen PDF drawing operations must be skipped.');
+}
+
+{
+  const canvas = { width: 256, height: 256,
+    getBoundingClientRect: () => ({ left: 0, top: 0 }),
+    getContext: () => ({ getImageData: () => ({ data: Uint8Array.of(255, 255, 255, 255) }) }) };
+  const view = { viewport: { height: 1000 }, canvas,
+    div: { getBoundingClientRect: () => ({ top: 0 }) } };
+  const scroll = appFunction('smokePdfScroll', '/// Report to the build server', {
+    pdfViewer: { getPageView: () => view, update() {} },
+    ui: { container: { scrollTop: 0, getBoundingClientRect: () => ({ top: 0, left: 0 }) } },
+    state: { file: { name: 'dense-page.pdf' } }, failures: [],
+    window: { devicePixelRatio: 1, requestAnimationFrame: (fn) => fn() },
+    performance: { now: () => 0 }, eventBus: { on() {}, off() {} },
+    sharpPdfViewport: () => true, settles: async () => true,
+  });
+  await assert.rejects(scroll(), /pixels did not change/,
+    'Blank or stale pixels must fail the dense PDF scrolling test.');
+}
+
+// Exercise the shipped renderer, including cancellation before the first draw.
+// An incomplete bounds cache must never suppress a later valid drawing operation.
+{
+  const prelude = `Map.prototype.getOrInsertComputed = function(key, create) {
+    if (!this.has(key)) this.set(key, create(key));
+    return this.get(key);
+  }; class Iterator {}`;
+  const core = runInNewContext(prelude +
+    pdfCoreSource.slice(0, pdfCoreSource.lastIndexOf('export{'))
+      .replaceAll('import.meta.url', '"file:///pdf-next/pdf.mjs"') +
+    '\n({PDFPageProxy, OPS: globalThis.pdfjsLib.OPS})', {
+    console, setTimeout, clearTimeout, DOMMatrix: class {},
+  });
+  const transport = {
+    commonObjs: {}, getRenderingIntent: () => ({ renderingIntent: 1, cacheKey: 'display' }),
+    getOptionalContentConfig: () => Promise.resolve({ renderingIntent: 1 }),
+    canvasFactory: {}, filterFactory: {},
+  };
+  const page = new core.PDFPageProxy(0, {}, transport, null);
+  page._pumpOperatorList = function({ cacheKey }) {
+    const state = this._intentStates.get(cacheKey);
+    state.operatorList = { fnArray: [core.OPS.paintSolidColorImageMask],
+      argsArray: [null], lastChunk: true, length: 1 };
+    state.displayReadyCapability.resolve(false);
+  };
+  let draws = 0;
+  const context = {
+    save() {}, restore() {}, transform() {},
+    fillRect(x, y, width, height) { if (width === 1 && height === 1) draws++; },
+    getTransform: () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }),
+  };
+  const canvas = { width: 100, height: 100, getContext: () => context };
+  context.canvas = canvas;
+  const options = { canvas, viewport: { scale: 1, transform: [1, 0, 0, 1, 0, 0] },
+    recordOperations: true };
+  const canceled = page.render(options);
+  canceled.onContinue = () => canceled.cancel();
+  await assert.rejects(canceled.promise, { name: 'RenderingCancelledException' });
+  assert.equal(page.recordedBBoxes, null, 'Canceled renders must not cache incomplete operation bounds.');
+  await page.render(options).promise;
+  assert.equal(page.recordedBBoxes.isEmpty(0), false, 'The completed redraw must record its drawing.');
+  let excluded = 0;
+  await page.render({ ...options, operationsFilter(index) {
+    if (page.recordedBBoxes.isEmpty(index)) {
+      excluded++;
+      return false;
+    }
+    return true;
+  } }).promise;
+  assert.equal(excluded, 0, 'Detail rendering must retain drawing after a canceled base render.');
+  assert.equal(draws, 2);
+}
 
 // Exercise the app functions with controlled IPC completion order.
 function appFunction(name, next, context, source = app) {
@@ -327,6 +480,8 @@ assert.match(
   /const MAX_CANVAS_PIXELS = [\d_]+;[\s\S]*?maxCanvasPixels: MAX_CANVAS_PIXELS/,
   'The canvas budget must be capped; it dominates resident memory.',
 );
+assert.match(app, /enableOptimizedPartialRendering: true/,
+  'High-density detail rendering must skip drawing operations outside the visible crop.');
 assert.match(
   app,
   /const pdfWorker = new PDFWorker\(\);[\s\S]*?worker: pdfWorker,/,
@@ -1379,6 +1534,9 @@ assert.doesNotMatch(
 for (const fixture of [
   'tests/fixtures/hello.pdf',
   'tests/fixtures/three-pages.pdf',
+  'tests/fixtures/dense-page.pdf',
+  'tests/fixtures/jbig2.pdf',
+  'tests/fixtures/jpeg2000.pdf',
   'tests/fixtures/swatch.png',
   'tests/fixtures/notes.md',
 ]) {
@@ -1388,6 +1546,18 @@ for (const fixture of [
 // The README must name the runtime it actually ships.
 const vendored = version.match(/Version:\s*(\S+)/)?.[1];
 assert.ok(vendored, 'src/vendor/PDFJS_VERSION must record a version.');
+for (const source of [
+  pdfCoreSource,
+  worker,
+  pdfViewerSource,
+]) {
+  assert.equal(source.match(/pdfjsVersion = (\S+)/)?.[1], vendored,
+    'Core, worker, and viewer must match the recorded PDF.js version.');
+}
+const viewerCss = await readFile('src/vendor/pdfjs/web/pdf_viewer.css', 'utf8');
+for (const match of viewerCss.matchAll(/url\(["']?(images\/[^)'"\s]+)["']?\)/g)) {
+  await access(`src/vendor/pdfjs/web/${match[1]}`);
+}
 assert.ok(
   readme.includes(vendored),
   `README.md must mention the vendored PDF.js version (${vendored}).`,
