@@ -89,16 +89,18 @@ certificates per signature.
 Check one locally before submitting:
 
 ```
-winget validate --manifest winget/RicardoFrantz.pdf-next/0.9.1
-winget install --manifest winget/RicardoFrantz.pdf-next/0.9.1
+winget validate --manifest winget/RicardoFrantz.pdf-next/0.13.2
+winget install --manifest winget/RicardoFrantz.pdf-next/0.13.2
 ```
 
 To publish a version, copy its folder into a fork of winget-pkgs at
 `manifests/r/RicardoFrantz/pdf-next/<version>/` and open a pull request.
 The [first submission](https://github.com/microsoft/winget-pkgs/pull/428398)
-is still awaiting review. The latest feedback asks to remove `DisplayVersion`
-when it equals `PackageVersion`. Keep the publisher and product code entries:
-they describe the installer registry values. Once merged:
+is updated to 0.13.2 and awaits Microsoft's policy review. Its manifests use
+schema 1.12.0 and omit `DisplayVersion` when it equals `PackageVersion`.
+Keep the publisher and product code entries: they describe the installer
+registry values. The 0.13.2 installer registers publisher `Ricardo Frantz`
+and product code `pdf-next`. Once merged:
 
 ```
 winget install RicardoFrantz.pdf-next
@@ -121,8 +123,8 @@ the same as `PackageVersion`. Or let
 [`wingetcreate update`](https://github.com/microsoft/winget-create) do it:
 
 ```
-wingetcreate update RicardoFrantz.pdf-next --version 0.9.1 \
-  --urls https://github.com/ricardofrantz/pdf-next/releases/download/v0.9.1/pdf-next_0.9.1_x64-setup.exe \
+wingetcreate update RicardoFrantz.pdf-next --version 0.13.2 \
+  --urls https://github.com/ricardofrantz/pdf-next/releases/download/v0.13.2/pdf-next_0.13.2_x64-setup.exe \
   --submit
 ```
 
