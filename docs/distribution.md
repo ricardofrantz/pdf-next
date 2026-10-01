@@ -95,8 +95,10 @@ winget install --manifest winget/RicardoFrantz.pdf-next/0.9.1
 
 To publish a version, copy its folder into a fork of winget-pkgs at
 `manifests/r/RicardoFrantz/pdf-next/<version>/` and open a pull request.
-The first submission takes a moderator a few days; later ones are checked by
-the bot and merged in hours. Once merged:
+The [first submission](https://github.com/microsoft/winget-pkgs/pull/428398)
+is still awaiting review. The latest feedback asks to remove `DisplayVersion`
+when it equals `PackageVersion`. Keep the publisher and product code entries:
+they describe the installer registry values. Once merged:
 
 ```
 winget install RicardoFrantz.pdf-next
@@ -114,7 +116,8 @@ crate is upgraded.
 
 For a new version: copy the folder, change `PackageVersion`, `InstallerUrl`,
 `InstallerSha256` (`sha256sum` of the `.exe` from the release page, upper
-case), `ReleaseDate` and `ReleaseNotesUrl`. Or let
+case), `ReleaseDate` and `ReleaseNotesUrl`. Omit `DisplayVersion` when it is
+the same as `PackageVersion`. Or let
 [`wingetcreate update`](https://github.com/microsoft/winget-create) do it:
 
 ```

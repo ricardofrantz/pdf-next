@@ -1,6 +1,7 @@
 # Privacy
 
-pdf-next is a viewer. It reads the files you open and nothing else.
+pdf-next reads the documents you open and their review sidecars. When you
+navigate an image folder, it lists neighboring files and opens the one you select.
 
 **Network.** A few seconds after launch the app sends one request to
 `api.github.com` to learn the latest release version, and it sends the same
@@ -10,13 +11,15 @@ download links. Nothing else is fetched, and nothing is sent anywhere. The
 application's Content Security Policy names `api.github.com` as the only host
 it may reach, so this is enforced by the browser engine, not just promised.
 
-**Storage.** The app remembers the window size for the last 80 files you
-opened, by path, in its own preferences folder. That is the only thing it
-writes. There is no account, no telemetry, no crash reporting and no
-analytics.
+**Storage.** The app saves your page appearance, poll interval, raw Markdown
+preference, and review text size in local browser storage. Tab paths, zoom,
+and scroll positions stay in memory for the current session. Reviews are saved
+beside the document as `{stem}_review.json`. The Reduce button can write
+`{stem}_reduced.pdf` beside the original. There is no account, telemetry,
+crash reporting, or analytics.
 
 **Documents.** PDFs, images and markdown are rendered on your machine. A
-markdown file's relative links and images are never fetched; `#` links
+markdown file's images are removed; `#` links
 scroll, web links open in your own browser, and links to other files open
 them in the viewer only when you click.
 

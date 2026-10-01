@@ -3,6 +3,7 @@
 // one-second poll, and the mid-build gap behaviour.
 import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
 import { findNormalizedSpan, reviewLabel } from '../src/review-label.mjs';
 import { mapCollapsedIndex, reconcilePendingComment } from '../src/review-sync.mjs';
 import {
@@ -21,6 +22,264 @@ const readme = await readFile('README.md', 'utf8');
 const page = await readFile('src/index.html', 'utf8');
 const smoke = await readFile('src/smoke.mjs', 'utf8');
 const nsisTemplate = await readFile('src-tauri/windows/installer.nsi', 'utf8');
+const releaseWorkflow = await readFile('.github/workflows/release.yml', 'utf8');
+assert.match(releaseWorkflow, /run: node tools\/check_frontend\.mjs/,
+  'Release builds must run frontend regressions before publishing.');
+assert.match(releaseWorkflow, /run: cargo test --locked/,
+  'Release builds must run Rust regressions before publishing.');
+
+// Exercise the app functions with controlled IPC completion order.
+function appFunction(name, next, context) {
+  const pattern = new RegExp(`(?:async )?function ${name}\\(`);
+  const start = app.search(pattern);
+  const end = app.indexOf(`\n${next}`, start);
+  assert.ok(start >= 0 && end > start, `Could not locate ${name}.`);
+  return runInNewContext(`${app.slice(start, end)}\n${name}`, context);
+}
+
+{
+  let released = false;
+  let shown = false;
+  const image = {
+    set src(value) {
+      assert.ok(released, 'Switching to an image must release the previous PDF first.');
+      shown = true;
+    },
+    set alt(value) {},
+    decode: async () => {},
+  };
+  const show = appFunction('showImage', 'async function openFile(', {
+    state: { generation: 1 },
+    ui: { image },
+    releaseDocument: async () => { released = true; },
+    sourceUrl: () => 'doc://image',
+    setImageRotation() {},
+    setImageScale() {},
+    restoreImageView() {},
+    trimWindowToContent() {},
+    scheduleWrap() {},
+  });
+  await show({ name: 'swatch.png' }, false, null, 1);
+  assert.ok(shown);
+}
+
+{
+  const note = { file: 'a.pdf', quote: 'selected text' };
+  const state = { file: { path: 'a.pdf' }, generation: 1, pendingNote: note };
+  const ui = {
+    noteBox: { hidden: false }, noteText: { value: 'unsaved comment' },
+    image: { removeAttribute() {} }, markdown: {}, markdownRaw: {},
+  };
+  const open = appFunction('openFile', 'async function openPath(', {
+    state, ui, printPending: false,
+    flushCommentSave: async () => {}, captureView: () => null,
+    clearPrintPages() {}, setTitle() {}, setStatus() {},
+    document: { body: { classList: { add() {}, toggle() {}, remove() {} } } },
+    showPdf: async () => {}, loadReviews: async () => {},
+  });
+  await open({ path: 'a.pdf', name: 'a.pdf', kind: 'pdf' }, { preserveView: true });
+  assert.equal(state.pendingNote, note, 'Reloading the same document must preserve the selected quote.');
+  assert.equal(ui.noteText.value, 'unsaved comment');
+  assert.equal(ui.noteBox.hidden, false);
+  await open({ path: 'b.pdf', name: 'b.pdf', kind: 'pdf' });
+  assert.equal(state.pendingNote, null, 'Changing documents must clear the old selection.');
+  assert.equal(ui.noteText.value, '');
+  assert.equal(ui.noteBox.hidden, true);
+}
+
+for (const pauseAt of ['save', 'close']) {
+  const state = { file: { path: 'a.pdf' }, generation: 1 };
+  let finish;
+  let started;
+  const waiting = new Promise((resolve) => { started = resolve; });
+  const pause = () => new Promise((resolve) => { finish = resolve; started(); });
+  const close = appFunction('closeAll', 'function cycleTab(', {
+    state,
+    flushCommentSave: pauseAt === 'save' ? pause : async () => {},
+    invoke: pauseAt === 'close' ? pause : async () => {
+      assert.fail('A superseded close must not clear the new watch target.');
+    },
+  });
+  const closing = close();
+  await waiting;
+  const nextFile = { path: 'b.pdf' };
+  state.file = nextFile;
+  state.generation += 1;
+  finish();
+  await closing;
+  assert.equal(state.file, nextFile, 'A superseded close must preserve the newly opened document.');
+}
+
+{
+  const state = { file: { path: 'a.pdf', kind: 'pdf' }, generation: 1, reviews: [] };
+  let finish;
+  let applied = false;
+  const load = appFunction('loadReviews', '/// Disk first.', {
+    state,
+    pendingComment: null,
+    commentSaveTimer: 0,
+    window: { clearTimeout() {} },
+    invoke: () => new Promise((resolve) => { finish = resolve; }),
+    applyReviewStore() { applied = true; },
+    setStatus() {},
+  });
+  const loading = load();
+  state.file = { path: 'b.pdf', kind: 'pdf' };
+  state.generation += 1;
+  finish({ reviews: [{ id: 'r1', file: 'a.pdf' }] });
+  await loading;
+  assert.equal(applied, false, 'A late review response must not replace another file’s reviews.');
+}
+
+{
+  const draft = { id: 'r1', comment: 'unsaved edit' };
+  const context = {
+    state: { file: { path: 'a.pdf' }, generation: 1 },
+    pendingComment: draft,
+    commentSaveTimer: 1,
+    window: { confirm: () => false, clearTimeout() {} },
+    invoke: async () => { assert.fail('Canceled deletion must not write.'); },
+  };
+  const remove = appFunction('deleteReview', 'async function jumpToReview(', context);
+  await remove('r1');
+  assert.equal(context.pendingComment, draft, 'Canceling deletion must preserve the pending edit.');
+  assert.equal(context.commentSaveTimer, 1);
+  context.window.confirm = () => true;
+  context.invoke = async () => { throw new Error('permission denied'); };
+  context.setStatus = () => {};
+  await remove('r1');
+  assert.equal(context.pendingComment, draft, 'Failed deletion must preserve the pending edit.');
+  assert.equal(context.commentSaveTimer, 1);
+}
+
+{
+  const original = [{ id: 'b1', file: 'b.pdf' }];
+  const state = { file: { path: 'a.pdf' }, generation: 1, reviews: [] };
+  let finish;
+  const update = appFunction('updateReviewComment', 'async function deleteReview(', {
+    state,
+    pendingComment: null,
+    invoke: () => new Promise((resolve) => { finish = resolve; }),
+    setStatus() {},
+    selectReview() {},
+  });
+  const updating = update('r1', 'edited', { quiet: true });
+  state.file = { path: 'b.pdf' };
+  state.generation += 1;
+  state.reviews = original;
+  finish({ reviews: [{ id: 'r1', file: 'a.pdf' }] });
+  await updating;
+  assert.equal(state.reviews, original, 'A late comment save must not change another file’s panel.');
+}
+
+{
+  const state = {
+    file: { path: 'a.pdf' }, generation: 1,
+    pendingNote: { file: 'a.pdf', kind: 'pdf', at: { page: 1 }, quote: 'text' },
+  };
+  let finish;
+  let applied = false;
+  const save = appFunction('saveNote', '/// Ask is', {
+    state,
+    ui: { noteText: { value: 'comment' }, noteBox: {} },
+    invoke: () => new Promise((resolve) => { finish = resolve; }),
+    applyReviewStore() { applied = true; },
+    setReviewOpen() {},
+    selectReview() {},
+    setStatus() {},
+  });
+  const saving = save();
+  state.file = { path: 'b.pdf' };
+  state.generation += 1;
+  finish({ reviews: [{ id: 'r1', file: 'a.pdf' }] });
+  await saving;
+  assert.equal(applied, false, 'A late new-review save must not change another file’s panel.');
+}
+
+{
+  const state = { reviews: [{ id: 'r1', at: { page: 1, end: 4_294_967_295 } }] };
+  let visited = 0;
+  const paint = appFunction('paintPdfMarks', 'function paintReviewMarks(', {
+    state,
+    pdfViewer: { pagesCount: 3 },
+    ui: { viewer: {
+      querySelectorAll: () => [],
+      querySelector: () => {
+        visited += 1;
+        assert.ok(visited <= 3, 'An imported review must not scan beyond the PDF page count.');
+        return null;
+      },
+    } },
+  });
+  paint();
+  assert.equal(visited, 3);
+}
+
+{
+  const state = { file: { kind: 'pdf' }, document: {}, generation: 1 };
+  let printed = false;
+  const print = appFunction('printDocument', '// Two ways to hear', {
+    state, printing: false, printPending: false, printBlurred: false,
+    clearPrintPages() {},
+    renderPrintPages: async () => { state.generation += 1; return true; },
+    invoke: async () => { printed = true; },
+    setStatus() {},
+  });
+  await print();
+  assert.equal(printed, false, 'A superseded print must not open the dialog.');
+}
+
+for (const release of ['0.9.0', '0.9.1']) {
+  const manifest = await readFile(
+    `winget/RicardoFrantz.pdf-next/${release}/RicardoFrantz.pdf-next.installer.yaml`,
+    'utf8',
+  );
+  assert.doesNotMatch(manifest, /^\s*DisplayVersion:/m, 'WinGet must omit redundant DisplayVersion.');
+}
+
+{
+  const { watchPdfRendering } = await import('../src/pdf-rendering.mjs');
+  const previousWindow = globalThis.window;
+  const queries = [];
+  const events = new Map();
+  const updates = [];
+  const viewer = {
+    pdfDocument: {},
+    _pages: [{
+      canvas: { width: 800 },
+      reset() { this.canvas = null; updates.push('reset'); },
+      update() { assert.equal(this.canvas, null); updates.push('scale'); },
+    }],
+    update() { updates.push('render'); },
+  };
+  globalThis.window = {
+    devicePixelRatio: 1,
+    matchMedia(query) {
+      const media = { query, handler: null,
+        addEventListener(event, fn) { this.handler = fn; },
+        removeEventListener() { this.handler = null; },
+      };
+      queries.push(media);
+      return media;
+    },
+    addEventListener(name, handler) { events.set(name, handler); },
+  };
+  try {
+    watchPdfRendering(viewer);
+    globalThis.window.devicePixelRatio = 2;
+    queries[0].handler();
+    assert.deepEqual(updates, ['reset', 'scale', 'render']);
+    assert.match(queries[1].query, /2dppx/);
+    events.get('resize')();
+    assert.equal(updates.length, 3, 'Resizing at unchanged density must not discard canvases.');
+    globalThis.window.devicePixelRatio = 1.5;
+    events.get('resize')();
+    assert.match(queries.at(-1).query, /1.5dppx/);
+    assert.deepEqual(updates.slice(-3), ['reset', 'scale', 'render']);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+}
 
 // PDF.js must parse in a real worker thread.
 assert.match(
@@ -182,7 +441,7 @@ assert.match(
 );
 assert.match(
   app,
-  /showImage\(file, !view && !keepWindow, view\)/,
+  /await showImage\(file, !view && !keepWindow, view, generation\)/,
   'Images must refit only on a fresh open — not on reload, not on a tab switch, and not when stepping through a folder.',
 );
 assert.match(
@@ -810,7 +1069,7 @@ assert.match(
 );
 assert.match(
   app,
-  /invoke\('append_review', \{\s*document: state\.file\.path,\s*review,/,
+  /invoke\('append_review', \{\s*document: path,\s*review,/,
   'A new review must append a record, not a markdown block.',
 );
 assert.match(
@@ -1106,5 +1365,14 @@ assert.ok(
   readme.includes(vendored),
   `README.md must mention the vendored PDF.js version (${vendored}).`,
 );
+
+const packageInfo = JSON.parse(await readFile('package.json', 'utf8'));
+const rustVersion = cargo.match(/^version = "([^"]+)"/m)?.[1];
+assert.equal(packageInfo.version, config.version, 'Frontend and bundle versions must agree.');
+assert.equal(rustVersion, config.version, 'Rust and bundle versions must agree.');
+const releaseTag = process.env.GITHUB_REF?.match(/^refs\/tags\/v(.+)$/)?.[1];
+if (releaseTag) {
+  assert.equal(releaseTag, config.version, 'The release tag must match the built version.');
+}
 
 console.log(`Frontend contracts passed (PDF.js ${vendored}).`);

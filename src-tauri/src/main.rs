@@ -70,6 +70,7 @@ struct FileInfo {
 
 #[derive(Clone, Serialize)]
 struct WatchEvent {
+    path: String,
     kind: &'static str,
     revision: u64,
 }
@@ -282,8 +283,8 @@ fn is_complete(path: &Path) -> bool {
 /// dropping them, or by stepping through a folder — and only of the kinds the
 /// viewer can show. The webview can name a path itself, so this is a limit on
 /// what is served, not a proof that nothing else is reachable.
-fn adopt(watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
-    if !path.exists() {
+fn adopt(watched: &Watched, path: PathBuf, activate: bool) -> Result<FileInfo, String> {
+    if !path.is_file() {
         return Err(format!("{} does not exist", path.display()));
     }
     if kind_for(&path) == "unknown" {
@@ -298,13 +299,15 @@ fn adopt(watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
     let (sidecar_modified, sidecar_len) = stat(&sidecar).unwrap_or((None, 0));
 
     let mut state = watched.0.lock().map_err(|error| error.to_string())?;
-    state.path = Some(canonical.clone());
-    state.modified = modified;
-    state.len = len;
-    state.missing = false;
-    state.sidecar_modified = sidecar_modified;
-    state.sidecar_len = sidecar_len;
-    state.sidecar_missing = !sidecar.exists();
+    if activate {
+        state.path = Some(canonical.clone());
+        state.modified = modified;
+        state.len = len;
+        state.missing = false;
+        state.sidecar_modified = sidecar_modified;
+        state.sidecar_len = sidecar_len;
+        state.sidecar_missing = !sidecar.exists();
+    }
     state.allowed.insert(canonical.clone());
     drop(state);
 
@@ -312,8 +315,19 @@ fn adopt(watched: &Watched, path: PathBuf) -> Result<FileInfo, String> {
 }
 
 #[tauri::command]
-fn open_path(path: String, watched: State<'_, Watched>) -> Result<FileInfo, String> {
-    adopt(&watched, PathBuf::from(path))
+fn open_path(
+    path: String,
+    activate: Option<bool>,
+    watched: State<'_, Watched>,
+) -> Result<FileInfo, String> {
+    adopt(&watched, PathBuf::from(path), activate.unwrap_or(true))
+}
+
+#[tauri::command]
+fn close_document(watched: State<'_, Watched>) -> Result<(), String> {
+    let mut state = watched.0.lock().map_err(|error| error.to_string())?;
+    state.path = None;
+    Ok(())
 }
 
 #[derive(Clone, Serialize)]
@@ -349,9 +363,10 @@ fn shrink_pdf_bytes(input: &[u8]) -> Vec<u8> {
 /// Leaves the original alone. Adds the copy to the served set so the
 /// frontend can open it as a tab.
 #[tauri::command]
-fn reduce_pdf(path: String, watched: State<'_, Watched>) -> Result<ReducePdfResult, String> {
+async fn reduce_pdf(path: String, watched: State<'_, Watched>) -> Result<ReducePdfResult, String> {
     let allowed = allowed_set(&watched)?;
-    let canonical = std::fs::canonicalize(PathBuf::from(&path)).map_err(|error| error.to_string())?;
+    let canonical =
+        std::fs::canonicalize(PathBuf::from(&path)).map_err(|error| error.to_string())?;
     if !allowed.contains(&canonical) {
         return Err("file is not open".into());
     }
@@ -359,7 +374,39 @@ fn reduce_pdf(path: String, watched: State<'_, Watched>) -> Result<ReducePdfResu
         return Err("only PDF files can be reduced".into());
     }
 
-    let input = std::fs::read(&canonical).map_err(|error| error.to_string())?;
+    let result = tauri::async_runtime::spawn_blocking(move || reduce_pdf_file(&canonical))
+        .await
+        .map_err(|error| error.to_string())??;
+    if result.wrote {
+        let served = std::fs::canonicalize(&result.path).map_err(|error| error.to_string())?;
+        let mut state = watched.0.lock().map_err(|error| error.to_string())?;
+        state.allowed.insert(served);
+    }
+    Ok(result)
+}
+
+fn write_reduced_copy(source: &Path, output: &[u8]) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let dest = reduced_pdf_path(source)?;
+    if dest.exists() {
+        return Err(format!(
+            "{} already exists; move it before reducing again",
+            dest.display()
+        ));
+    }
+    let mut temp = tempfile::NamedTempFile::new_in(dest.parent().unwrap_or(Path::new(".")))
+        .map_err(|error| error.to_string())?;
+    temp.write_all(output).map_err(|error| error.to_string())?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    temp.persist_noclobber(&dest)
+        .map_err(|error| error.to_string())?;
+    Ok(dest)
+}
+
+fn reduce_pdf_file(canonical: &Path) -> Result<ReducePdfResult, String> {
+    let input = std::fs::read(canonical).map_err(|error| error.to_string())?;
     let before = input.len() as u64;
     let output = shrink_pdf_bytes(&input);
     let after = output.len() as u64;
@@ -372,21 +419,8 @@ fn reduce_pdf(path: String, watched: State<'_, Watched>) -> Result<ReducePdfResu
         });
     }
 
-    let dest = reduced_pdf_path(&canonical)?;
-    if dest == canonical {
-        return Err("refusing to overwrite the open file".into());
-    }
-    let temp = dest.with_extension("pdf.reducing");
-    std::fs::write(&temp, &output).map_err(|error| error.to_string())?;
-    if let Err(error) = std::fs::rename(&temp, &dest) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(error.to_string());
-    }
-
-    let mut state = watched.0.lock().map_err(|error| error.to_string())?;
+    let dest = write_reduced_copy(canonical, &output)?;
     let served = std::fs::canonicalize(&dest).unwrap_or(dest.clone());
-    state.allowed.insert(served.clone());
-    drop(state);
 
     Ok(ReducePdfResult {
         path: display_path(&served),
@@ -580,7 +614,7 @@ fn deliver(app: &AppHandle, files: Vec<(PathBuf, Target)>, focus: bool) {
                 if let Some(first) = openings.first() {
                     let path = PathBuf::from(&first.path);
                     drop(state);
-                    let _ = adopt(&watched, path);
+                    let _ = adopt(&watched, path, true);
                     state = match watched.0.lock() {
                         Ok(state) => state,
                         Err(_) => return,
@@ -1344,6 +1378,7 @@ fn watch_review_sidecar(
             let _ = app.emit(
                 "reviews-changed",
                 WatchEvent {
+                    path: display_path(doc),
                     kind: if reappeared { "restored" } else { "changed" },
                     revision: REVISION.load(Ordering::Relaxed),
                 },
@@ -1367,6 +1402,7 @@ fn watch_review_sidecar(
             let _ = app.emit(
                 "reviews-changed",
                 WatchEvent {
+                    path: display_path(doc),
                     kind: "missing",
                     revision: REVISION.load(Ordering::Relaxed),
                 },
@@ -1459,6 +1495,7 @@ fn spawn_watcher(app: AppHandle) {
                         let _ = app.emit(
                             "file-changed",
                             WatchEvent {
+                                path: display_path(&path),
                                 kind: if reappeared { "restored" } else { "changed" },
                                 revision,
                             },
@@ -1482,6 +1519,7 @@ fn spawn_watcher(app: AppHandle) {
                     let _ = app.emit(
                         "file-changed",
                         WatchEvent {
+                            path: display_path(&path),
                             kind: "missing",
                             revision: REVISION.load(Ordering::Relaxed),
                         },
@@ -1636,7 +1674,7 @@ fn parse_store(text: &str) -> Result<ReviewFile, String> {
         return Err("unsupported review format".into());
     }
     let mut parsed = parsed;
-    ensure_ids(&mut parsed.reviews);
+    ensure_ids(&mut parsed.reviews)?;
     parsed.format = 2;
     Ok(parsed)
 }
@@ -1695,7 +1733,7 @@ fn adopt_reviews(store: &mut ReviewFile, basename: &str, kind: &str) {
     }
 }
 
-fn ensure_ids(reviews: &mut [Review]) {
+fn ensure_ids(reviews: &mut [Review]) -> Result<(), String> {
     let mut max = reviews
         .iter()
         .filter_map(|review| {
@@ -1710,14 +1748,15 @@ fn ensure_ids(reviews: &mut [Review]) {
     for review in reviews.iter_mut() {
         let fresh = review.id.is_empty() || !seen.insert(review.id.clone());
         if fresh {
-            max += 1;
+            max = max.checked_add(1).ok_or("review id limit reached")?;
             review.id = format!("r{max}");
             seen.insert(review.id.clone());
         }
     }
+    Ok(())
 }
 
-fn next_review_id(reviews: &[Review]) -> String {
+fn next_review_id(reviews: &[Review]) -> Result<String, String> {
     let max = reviews
         .iter()
         .filter_map(|review| {
@@ -1728,12 +1767,26 @@ fn next_review_id(reviews: &[Review]) -> String {
         })
         .max()
         .unwrap_or(0);
-    format!("r{}", max + 1)
+    let next = max.checked_add(1).ok_or("review id limit reached")?;
+    Ok(format!("r{next}"))
 }
 
 fn save_store(sidecar: &Path, store: &ReviewFile) -> Result<(), String> {
+    use std::io::Write;
     let json = serde_json::to_string_pretty(store).map_err(|error| error.to_string())?;
-    std::fs::write(sidecar, format!("{json}\n")).map_err(|error| error.to_string())
+    let mut temp = tempfile::NamedTempFile::new_in(sidecar.parent().unwrap_or(Path::new(".")))
+        .map_err(|error| error.to_string())?;
+    if let Ok(metadata) = std::fs::metadata(sidecar) {
+        temp.as_file()
+            .set_permissions(metadata.permissions())
+            .map_err(|error| error.to_string())?;
+    }
+    writeln!(temp, "{json}").map_err(|error| error.to_string())?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    temp.persist(sidecar).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn review_fingerprint(review: &Review) -> String {
@@ -1747,7 +1800,8 @@ fn review_fingerprint(review: &Review) -> String {
 /// folder `_review.json`. The merge stays in memory until the next write.
 fn load_store(doc_path: &Path) -> Result<(PathBuf, ReviewFile), String> {
     let sidecar = review_sidecar(doc_path);
-    let mut store = if sidecar.exists() {
+    let migrated = sidecar.exists();
+    let mut store = if migrated {
         parse_store(&std::fs::read_to_string(&sidecar).map_err(|error| error.to_string())?)?
     } else {
         empty_store()
@@ -1759,7 +1813,7 @@ fn load_store(doc_path: &Path) -> Result<(PathBuf, ReviewFile), String> {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(LEGACY_REVIEW_FILE);
-    if legacy.exists() {
+    if !migrated && legacy.exists() {
         let basename = doc_path
             .file_name()
             .and_then(|name| name.to_str())
@@ -1772,7 +1826,7 @@ fn load_store(doc_path: &Path) -> Result<(PathBuf, ReviewFile), String> {
                 store.reviews.push(review);
             }
         }
-        ensure_ids(&mut store.reviews);
+        ensure_ids(&mut store.reviews)?;
     }
     Ok((sidecar, store))
 }
@@ -1835,7 +1889,7 @@ fn write_review(
 
     let (sidecar, mut store) = load_store(&doc_path)?;
     drop_redundant_end(&mut review);
-    review.id = next_review_id(&store.reviews);
+    review.id = next_review_id(&store.reviews)?;
     store.reviews.push(review);
     store.format = 2;
     save_store(&sidecar, &store)?;
@@ -1864,7 +1918,11 @@ fn change_review_comment(
     let doc_path = open_review_document(document, allowed)?;
     let basename = document_basename(&doc_path)?;
     let (sidecar, mut store) = load_store(&doc_path)?;
-    let Some(review) = store.reviews.iter_mut().find(|review| review.id == id) else {
+    let Some(review) = store
+        .reviews
+        .iter_mut()
+        .find(|review| review.id == id && review.file == basename)
+    else {
         return Err("review not found".into());
     };
     review.comment = comment.trim().to_string();
@@ -1885,7 +1943,9 @@ fn remove_review(
     let basename = document_basename(&doc_path)?;
     let (sidecar, mut store) = load_store(&doc_path)?;
     let before = store.reviews.len();
-    store.reviews.retain(|review| review.id != id);
+    store
+        .reviews
+        .retain(|review| review.id != id || review.file != basename);
     if store.reviews.len() == before {
         return Err("review not found".into());
     }
@@ -2553,6 +2613,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             open_path,
+            close_document,
             initial_file,
             pending_files,
             pick_file,
@@ -2582,7 +2643,7 @@ fn main() {
             }
             app.manage(launch);
             if let Some((path, _)) = first {
-                let _ = adopt(&app.state::<Watched>(), path);
+                let _ = adopt(&app.state::<Watched>(), path, true);
             }
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
@@ -2647,6 +2708,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{adopt, empty_store, review_sidecar, save_store, Watched, LEGACY_REVIEW_FILE};
     use super::{
         change_review_comment, document_watch_due, list_reviews, natural_key, open_download,
         open_link, parse_cli, parse_store, reduced_pdf_path, remove_review, render_markdown,
@@ -2811,10 +2873,15 @@ mod tests {
             reduced_pdf_path(&path).unwrap(),
             PathBuf::from("/papers/wake_reduced.pdf")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reduced_pdf_path_preserves_the_windows_folder() {
         let windows = PathBuf::from(r"C:\a\b.pdf");
         assert_eq!(
-            reduced_pdf_path(&windows).unwrap().file_name().unwrap(),
-            "b_reduced.pdf"
+            reduced_pdf_path(&windows).unwrap(),
+            PathBuf::from(r"C:\a\b_reduced.pdf")
         );
     }
 
@@ -3296,6 +3363,116 @@ mod tests {
         assert_eq!(other.comment, "second");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_reviews_stay_deleted_or_updated_after_migration() {
+        let dir = scratch("legacy_mutation");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let mut legacy = empty_store();
+        legacy.reviews.push(pdf_review());
+        save_store(&dir.join(LEGACY_REVIEW_FILE), &legacy).unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let document = pdf.to_str().unwrap();
+        let listed = list_reviews(document, &allowed).unwrap();
+        let id = listed.reviews[0].id.clone();
+        change_review_comment(document, &id, "updated", &allowed).unwrap();
+        let updated = list_reviews(document, &allowed).unwrap();
+        assert_eq!(
+            updated.reviews.len(),
+            1,
+            "legacy rows must not be merged again"
+        );
+        assert_eq!(updated.reviews[0].comment, "updated");
+        remove_review(document, &id, &allowed).unwrap();
+        assert!(list_reviews(document, &allowed).unwrap().reviews.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn registering_a_background_tab_keeps_the_active_file_watched() {
+        let dir = scratch("background_watch");
+        let active = dir.join("active.pdf");
+        let background = dir.join("background.pdf");
+        std::fs::write(&active, b"%PDF-1.1\n%%EOF\n").unwrap();
+        std::fs::write(&background, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let watched = Watched::default();
+        adopt(&watched, active.clone(), true).unwrap();
+        adopt(&watched, background.clone(), false).unwrap();
+        let state = watched.0.lock().unwrap();
+        assert_eq!(state.path, Some(std::fs::canonicalize(&active).unwrap()));
+        assert!(state
+            .allowed
+            .contains(&std::fs::canonicalize(&background).unwrap()));
+        drop(state);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review_mutations_cannot_change_another_documents_rows() {
+        let dir = scratch("review_scope");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let mut foreign = pdf_review();
+        foreign.id = "r1".into();
+        foreign.file = "other.pdf".into();
+        let mut store = empty_store();
+        store.reviews.push(foreign.clone());
+        save_store(&review_sidecar(&pdf), &store).unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let document = pdf.to_str().unwrap();
+        assert!(change_review_comment(document, "r1", "changed", &allowed).is_err());
+        assert!(remove_review(document, "r1", &allowed).is_err());
+        let saved = parse_store(&std::fs::read_to_string(review_sidecar(&pdf)).unwrap()).unwrap();
+        assert_eq!(saved.reviews, vec![foreign]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn saving_reviews_preserves_an_open_snapshot_of_the_old_file() {
+        use std::io::Read;
+        let dir = scratch("atomic_review_save");
+        let sidecar = dir.join("paper_review.json");
+        let old = b"{\"format\":2,\"reviews\":[]}\n";
+        std::fs::write(&sidecar, old).unwrap();
+        let mut snapshot = std::fs::File::open(&sidecar).unwrap();
+        let mut store = empty_store();
+        store.reviews.push(pdf_review());
+        save_store(&sidecar, &store).unwrap();
+        let mut bytes = Vec::new();
+        snapshot.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            bytes, old,
+            "the existing file must be replaced, not truncated"
+        );
+        assert_eq!(
+            parse_store(&std::fs::read_to_string(&sidecar).unwrap())
+                .unwrap()
+                .reviews
+                .len(),
+            1
+        );
+        drop(snapshot);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_review_ids_return_an_error_instead_of_panicking() {
+        assert!(parse_store(r#"{"reviews":[{"id":"r4294967295"},{}]}"#).is_err());
+    }
+
+    #[test]
+    fn reduced_copy_does_not_replace_an_existing_file() {
+        let dir = scratch("reduced_copy");
+        let source = dir.join("paper.pdf");
+        std::fs::write(&source, b"original").unwrap();
+        let dest = super::write_reduced_copy(&source, b"reduced").unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"original");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"reduced");
+        assert!(super::write_reduced_copy(&source, b"replacement").is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"reduced");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

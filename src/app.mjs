@@ -3,6 +3,7 @@
 import { bootIsFine, failures, mark } from './smoke.mjs';
 import { findNormalizedSpan, reviewIdNum, reviewLabel } from './review-label.mjs';
 import { mapCollapsedIndex, reconcilePendingComment } from './review-sync.mjs';
+import { watchPdfRendering } from './pdf-rendering.mjs';
 import {
   REVIEW_SIZE_DEFAULT,
   REVIEW_SIZE_STEPS,
@@ -194,6 +195,7 @@ const pdfViewer = new TidyViewer({
   annotationMode: 1,
 });
 linkService.setViewer(pdfViewer);
+watchPdfRendering(pdfViewer);
 
 // ── Title ─────────────────────────────────────────────────────────────────
 
@@ -1027,7 +1029,11 @@ async function stepSibling(delta) {
   }
 }
 
-function showImage(file, fit, view) {
+async function showImage(file, fit, view, generation) {
+  await releaseDocument();
+  if (state.generation !== generation) {
+    return;
+  }
   if (!view) {
     // A new picture comes up upright. Reset before the swap so the old turn
     // is not applied to the new bitmap for the frame it takes to decode.
@@ -1035,29 +1041,31 @@ function showImage(file, fit, view) {
   }
   ui.image.src = sourceUrl(file);
   ui.image.alt = file.name;
-  ui.image.decode?.().then(
-    () => {
-      if (view) {
-        restoreImageView(view);
-      } else {
-        setImageScale(1, { refit: false });
-      }
-      if (fit) {
-        void trimWindowToContent({ recenter: true });
-      }
-      scheduleWrap();
-    },
-    () => {},
-  );
+  await ui.image.decode();
+  if (state.generation !== generation) {
+    return;
+  }
+  if (view) {
+    restoreImageView(view);
+  } else {
+    setImageScale(1, { refit: false });
+  }
+  if (fit) {
+    await trimWindowToContent({ recenter: true });
+  }
+  scheduleWrap();
 }
 
 async function openFile(
   file,
   { preserveView = false, keepWindow = false, view: given = null } = {},
 ) {
-  await flushCommentSave();
   // Rebuilds can outpace loading; only the newest one may touch the UI.
   const generation = ++state.generation;
+  await flushCommentSave();
+  if (state.generation !== generation) {
+    return;
+  }
   const view = given || (preserveView ? captureView() : null);
   // Pages rendered for paper belong to the document that was open then — but
   // not while a dialog is holding them: a rebuild lands every second in the
@@ -1087,7 +1095,13 @@ async function openFile(
     setStatus(`Unsupported file type: ${file.name}`, { error: true, sticky: true });
     return;
   }
+  if (state.file?.path !== file.path) {
+    state.pendingNote = null;
+    ui.noteBox.hidden = true;
+    ui.noteText.value = '';
+  }
   state.file = file;
+  state.natural = null;
   document.body.classList.add('has-file');
   document.body.classList.toggle('kind-pdf', file.kind === 'pdf');
   document.body.classList.toggle('kind-image', file.kind === 'image');
@@ -1109,12 +1123,15 @@ async function openFile(
     if (file.kind === 'pdf') {
       await showPdf(file, view, generation);
     } else if (file.kind === 'image') {
-      showImage(file, !view && !keepWindow, view);
+      await showImage(file, !view && !keepWindow, view, generation);
       void loadSiblings(file);
     } else if (file.kind === 'markdown') {
       await showMarkdown(file, view, generation, !view && !keepWindow);
     } else if (file.kind === 'json') {
       await showJson(file, view, generation, !view && !keepWindow);
+    }
+    if (state.generation !== generation) {
+      return;
     }
     if (file.kind === 'markdown' || file.kind === 'pdf') {
       await loadReviews();
@@ -1122,7 +1139,9 @@ async function openFile(
       await setReviewOpen(false);
       applyReviewStore({ reviews: [] });
     }
-    document.body.classList.remove('file-missing');
+    if (state.generation === generation) {
+      document.body.classList.remove('file-missing');
+    }
   } catch (error) {
     // A load cancelled by a newer rebuild is expected, not a failure to report.
     if (state.generation !== generation) {
@@ -1137,7 +1156,7 @@ async function openFile(
 
 async function openPath(path, { activate = true, target = null } = {}) {
   try {
-    const file = await invoke('open_path', { path });
+    const file = await invoke('open_path', { path, activate });
     await openInTab(file, { activate, target });
   } catch (error) {
     setStatus(String(error), { error: true, sticky: true });
@@ -1465,6 +1484,15 @@ async function closeTab(index) {
 
 /// Back to the small empty window you get on a cold start.
 async function closeAll() {
+  const generation = ++state.generation;
+  await flushCommentSave();
+  if (state.generation !== generation) {
+    return;
+  }
+  await invoke('close_document');
+  if (state.generation !== generation) {
+    return;
+  }
   state.tabs = [];
   state.active = -1;
   state.views.clear();
@@ -1474,6 +1502,9 @@ async function closeAll() {
   state.siblingIndex = -1;
   state.pendingRevision = null;
   await releaseDocument();
+  if (state.generation !== generation) {
+    return;
+  }
   ui.image.removeAttribute('src');
   ui.markdown.textContent = '';
   ui.markdownRaw.textContent = '';
@@ -1497,6 +1528,9 @@ async function closeAll() {
   ui.noteText.value = '';
   state.reviewGrown = false;
   await setReviewOpen(false);
+  if (state.generation !== generation) {
+    return;
+  }
   applyReviewStore({ reviews: [] });
   setStatus('');
 }
@@ -1841,6 +1875,9 @@ async function printDocument() {
       ui.printPages.append(wrapper);
       await img.decode().catch(() => {});
     }
+    if (state.generation !== generation) {
+      return;
+    }
     setStatus('');
     // Claimed before the call, not after: on Linux the dialog blocks and this
     // does not return until it has been closed.
@@ -2143,6 +2180,8 @@ async function saveNote() {
   if (!state.pendingNote || !state.file) {
     return;
   }
+  const path = state.file.path;
+  const generation = state.generation;
 
   const comment = ui.noteText.value.trim();
   const review = {
@@ -2155,9 +2194,12 @@ async function saveNote() {
 
   try {
     const store = await invoke('append_review', {
-      document: state.file.path,
+      document: path,
       review,
     });
+    if (state.generation !== generation || state.file?.path !== path) {
+      return;
+    }
     applyReviewStore(store);
     ui.noteBox.hidden = true;
     ui.noteText.value = '';
@@ -2168,7 +2210,9 @@ async function saveNote() {
     }
     setStatus('Review saved');
   } catch (error) {
-    setStatus(String(error), { error: true });
+    if (state.generation === generation && state.file?.path === path) {
+      setStatus(String(error), { error: true });
+    }
   }
 }
 
@@ -2261,8 +2305,13 @@ async function loadReviews({ fromDisk = false } = {}) {
     applyReviewStore({ reviews: [] });
     return;
   }
+  const path = state.file.path;
+  const generation = state.generation;
   try {
-    const store = await invoke('read_reviews', { document: state.file.path });
+    const store = await invoke('read_reviews', { document: path });
+    if (state.generation !== generation || state.file?.path !== path) {
+      return;
+    }
     const diskReviews = Array.isArray(store?.reviews) ? store.reviews : [];
     let keepDraftId = null;
     let draft = '';
@@ -2282,6 +2331,9 @@ async function loadReviews({ fromDisk = false } = {}) {
     }
     applyReviewStore(store, { keepDraftId, draft });
   } catch (error) {
+    if (state.generation !== generation || state.file?.path !== path) {
+      return;
+    }
     if (fromDisk && state.reviews.length) {
       return;
     }
@@ -2442,8 +2494,13 @@ async function updateReviewComment(id, comment, { quiet = false } = {}) {
   if (!state.file) {
     return;
   }
+  const path = state.file.path;
+  const generation = state.generation;
   try {
-    const store = await invoke('update_review', { document: state.file.path, id, comment });
+    const store = await invoke('update_review', { document: path, id, comment });
+    if (state.generation !== generation || state.file?.path !== path) {
+      return;
+    }
     const reviews = Array.isArray(store?.reviews) ? store.reviews : [];
     state.reviews = reviews;
     if (!quiet) {
@@ -2451,6 +2508,9 @@ async function updateReviewComment(id, comment, { quiet = false } = {}) {
       setStatus('Review updated');
     }
   } catch (error) {
+    if (state.generation !== generation || state.file?.path !== path) {
+      return;
+    }
     if (/not found/i.test(String(error))) {
       pendingComment = null;
       return;
@@ -2460,25 +2520,33 @@ async function updateReviewComment(id, comment, { quiet = false } = {}) {
 }
 
 async function deleteReview(id) {
-  if (pendingComment?.id === id) {
-    pendingComment = null;
-    window.clearTimeout(commentSaveTimer);
-    commentSaveTimer = 0;
-  }
   if (!state.file) {
     return;
   }
   if (!window.confirm('Delete this review?')) {
     return;
   }
+  const path = state.file.path;
+  const generation = state.generation;
   try {
-    applyReviewStore(await invoke('delete_review', { document: state.file.path, id }));
+    const store = await invoke('delete_review', { document: path, id });
+    if (state.generation !== generation || state.file?.path !== path) {
+      return;
+    }
+    if (pendingComment?.id === id) {
+      pendingComment = null;
+      window.clearTimeout(commentSaveTimer);
+      commentSaveTimer = 0;
+    }
+    applyReviewStore(store);
     if (state.selectedReviewId === id) {
       state.selectedReviewId = null;
     }
     setStatus('Review deleted');
   } catch (error) {
-    setStatus(String(error), { error: true });
+    if (state.generation === generation && state.file?.path === path) {
+      setStatus(String(error), { error: true });
+    }
   }
 }
 
@@ -2752,7 +2820,7 @@ function paintPdfMarks() {
     if (!start) {
       continue;
     }
-    const end = review.at.end || start;
+    const end = Math.min(review.at.end || start, pdfViewer.pagesCount);
     let placed = false;
     for (let pageNum = start; pageNum <= end; pageNum += 1) {
       const page = ui.viewer.querySelector(`.page[data-page-number="${pageNum}"]`);
@@ -3553,8 +3621,8 @@ const openFilesReady = listen('open-files', (event) =>
 );
 
 // The watcher fires at most once a second, and only when something moved.
-listen('reviews-changed', async () => {
-  if (!state.file) {
+listen('reviews-changed', async (event) => {
+  if (!state.file || event.payload?.path !== state.file.path) {
     return;
   }
   if (document.visibilityState === 'hidden') {
@@ -3565,8 +3633,8 @@ listen('reviews-changed', async () => {
 });
 
 listen('file-changed', async (event) => {
-  const { kind, revision } = event.payload || {};
-  if (!state.file) {
+  const { path, kind, revision } = event.payload || {};
+  if (!state.file || path !== state.file.path) {
     return;
   }
   if (kind === 'missing') {
@@ -3792,12 +3860,31 @@ async function reportSmoke() {
     if (file.kind === 'pdf') {
       const pages = state.document?.numPages ?? 0;
       const painted = await renderedPixels();
-      const ok = pages > 0 && painted;
+      // Cross the canvas cap even on a 1x runner. A painted low-resolution
+      // base without a completed detail canvas must not count as sharp.
+      let sharp = false;
+      if (painted) {
+        pdfViewer.currentScaleValue = '6';
+        sharp = await settles(() => {
+          const view = pdfViewer.getPageView(0);
+          const rendered = view?.detailView || view;
+          const canvas = rendered?.canvas;
+          if (rendered?.renderingState !== 3 || !canvas || canvas.hidden) {
+            return false;
+          }
+          const rect = canvas.getBoundingClientRect();
+          const density = window.devicePixelRatio || 1;
+          return rect.width > 0 && rect.height > 0 &&
+            canvas.width >= Math.floor(rect.width * density) - 2 &&
+            canvas.height >= Math.floor(rect.height * density) - 2;
+        });
+      }
+      const ok = pages > 0 && painted && sharp && failures.length === 0;
       await invoke('smoke_report', {
         ok,
         detail: ok
-          ? `${file.name} rendered, ${pages} page${pages === 1 ? '' : 's'}`
-          : `${file.name} did not render: ${pages} pages, painted=${painted}${note()}`,
+          ? `${file.name} rendered sharply at 600%, ${pages} page${pages === 1 ? '' : 's'}`
+          : `${file.name} did not render sharply: ${pages} pages, painted=${painted}, sharp=${sharp}${note()}`,
       });
       return;
     }
@@ -3813,8 +3900,8 @@ async function reportSmoke() {
           : (ui.markdown?.textContent || '').trim().length > 0,
     );
     await invoke('smoke_report', {
-      ok: shown,
-      detail: shown
+      ok: shown && failures.length === 0,
+      detail: shown && failures.length === 0
         ? `${file.name} rendered (${file.kind})`
         : `${file.name} did not render (${file.kind})${note()}`,
     });
