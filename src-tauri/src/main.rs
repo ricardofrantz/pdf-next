@@ -2441,6 +2441,27 @@ fn remove_review(
     Ok(reviews_for_file(store, &basename))
 }
 
+/// JSON equality that compares numbers by value. The webview sends a stored
+/// `72.0` back as `72`, and serde_json treats those two as different.
+fn same_json(first: &serde_json::Value, second: &serde_json::Value) -> bool {
+    use serde_json::Value;
+
+    match (first, second) {
+        (Value::Number(a), Value::Number(b)) if a.is_f64() || b.is_f64() => {
+            a.as_f64() == b.as_f64()
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_json(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(key, value)| b.get(key).is_some_and(|other| same_json(value, other)))
+        }
+        _ => first == second,
+    }
+}
+
 fn remove_review_cas(
     document: &str,
     id: &str,
@@ -2461,7 +2482,7 @@ fn remove_review_cas(
         .position(|review| review.id == id && review.file == basename)
         .ok_or_else(|| "review not found".to_string())?;
     let current = serde_json::to_value(&store.reviews[index]).map_err(|error| error.to_string())?;
-    if current != *expected_review {
+    if !same_json(&current, expected_review) {
         return Err("review conflict: record changed on disk".into());
     }
     store.reviews.remove(index);
@@ -2535,7 +2556,7 @@ fn patch_review_record(
         let actual = current.get(key).cloned().unwrap_or(serde_json::Value::Null);
         if expected
             .get(key)
-            .is_some_and(|expected_value| expected_value != &actual)
+            .is_some_and(|expected_value| !same_json(expected_value, &actual))
         {
             return Err(format!("review conflict: {key} changed on disk"));
         }
@@ -3382,7 +3403,7 @@ mod tests {
         natural_key, next_review_id, open_download, open_link, parse_cli, parse_store,
         patch_review_record, read_snapshot, reduced_pdf_path, remove_review, remove_review_cas,
         rename_with_retry, render_markdown, shrink_pdf_bytes, sidecar_ready, write_review, Cli,
-        Review, ReviewAt, Target,
+        Review, ReviewAnchor, ReviewAt, ReviewPosition, Target,
     };
     use std::collections::HashSet;
     use std::ffi::OsString;
@@ -4334,6 +4355,65 @@ mod tests {
         let error = remove_review_cas(path, "r1", &expected, &allowed).unwrap_err();
         assert!(error.starts_with("review conflict:"), "{error}");
         assert_eq!(list_reviews(path, &allowed).unwrap().reviews.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// JSON.parse then JSON.stringify writes `72.0` as `72`.
+    fn as_javascript_sends(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Number(number) => match number.as_f64() {
+                Some(float) if number.is_f64() && float.fract() == 0.0 && float >= 0.0 => {
+                    serde_json::Value::from(float as u64)
+                }
+                _ => serde_json::Value::Number(number),
+            },
+            serde_json::Value::Array(items) => items.into_iter().map(as_javascript_sends).collect(),
+            serde_json::Value::Object(map) => map
+                .into_iter()
+                .map(|(key, value)| (key, as_javascript_sends(value)))
+                .collect(),
+            other => other,
+        }
+    }
+
+    #[test]
+    fn whole_number_positions_from_javascript_still_match_the_stored_record() {
+        let dir = scratch("review_cas_whole_numbers");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let path = pdf.to_str().unwrap();
+        let mut review = pdf_review();
+        review.anchor = Some(ReviewAnchor {
+            position: Some(ReviewPosition {
+                page: Some(7),
+                x: Some(0.0),
+                y: Some(72.0),
+                extra: serde_json::Map::new(),
+            }),
+            ..ReviewAnchor::default()
+        });
+        write_review(path, review.clone(), &allowed).unwrap();
+        write_review(path, review, &allowed).unwrap();
+        let listed = list_reviews(path, &allowed).unwrap();
+
+        let anchor = as_javascript_sends(serde_json::to_value(&listed.reviews[0].anchor).unwrap());
+        assert_eq!(anchor["position"]["x"], serde_json::json!(0));
+        let mut moved = anchor.clone();
+        moved["position"]["x"] = serde_json::json!(10.5);
+        patch_review_record(
+            path,
+            "r1",
+            &serde_json::json!({ "anchor": moved }),
+            &serde_json::json!({ "anchor": anchor }),
+            &allowed,
+            false,
+        )
+        .unwrap();
+
+        let expected = as_javascript_sends(serde_json::to_value(&listed.reviews[1]).unwrap());
+        let left = remove_review_cas(path, "r2", &expected, &allowed).unwrap();
+        assert_eq!(left.reviews.len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
