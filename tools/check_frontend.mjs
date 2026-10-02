@@ -1473,6 +1473,27 @@ assert.notEqual(reviewStateKey('a.pdf', 'r1'), reviewStateKey('b.pdf', 'r1'),
   assert.equal(value.documentRevision, 'sha256:abc');
 }
 {
+  const expectedComment = '  agent note\n';
+  const draft = { id: 'r1', comment: 'my edit', expectedComment };
+  const unchanged = reconcilePendingComment(draft, [{ id: 'r1', comment: expectedComment }], []);
+  assert.equal(unchanged.pending.expectedComment, expectedComment,
+    'Reconciliation must preserve the exact disk comment used by backend compare-and-swap.');
+  assert.equal(unchanged.conflict, null);
+  const changed = reconcilePendingComment(draft, [{ id: 'r1', comment: 'agent note' }], []);
+  assert.equal(changed.conflict, 'changed',
+    'Whitespace-only changes on disk still change the compare-and-swap value.');
+}
+{
+  const pages = [{ page: 1, text: 'aaaa' }];
+  assert.equal(resolveReviewAnchor(pages, 'aaa').status, 'ambiguous',
+    'Overlapping quote occurrences cannot be treated as a unique selection.');
+  assert.equal(resolveReviewAnchor(pages, 'aaa', { prefix: 'missing' }).status, 'ambiguous',
+    'An unmatched context does not make overlapping repeated quotes unique.');
+  assert.deepEqual(resolveReviewAnchor(pages, 'aaa', { prefix: 'a' }),
+    { status: 'located', page: 1, start: 1, end: 4 },
+    'Context can disambiguate an overlapping occurrence.');
+}
+{
   const pages = [
     { page: 2, text: 'start alpha repeated phrase end. second repeated phrase elsewhere.' },
     { page: 8, text: 'before repeated phrase after' },

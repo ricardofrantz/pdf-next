@@ -80,7 +80,7 @@ export function resolveReviewAnchor(pages, quote, anchor = {}) {
         if (matchesContext(item.text, from, end, anchor)) {
           found.push({ page: item.page, start: from, end });
         }
-        from = end;
+        from += 1;
       }
     }
     return found;
@@ -92,7 +92,7 @@ export function resolveReviewAnchor(pages, quote, anchor = {}) {
     let from = 0;
     while ((from = item.text.indexOf(want, from)) >= 0) {
       count += 1;
-      from += want.length;
+      from += 1;
     }
     return count;
   }, 0);

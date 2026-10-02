@@ -13,11 +13,11 @@ export function reconcilePendingComment(pending, diskReviews, savedReviews) {
     return { pending, keepDraftId: pending.id, conflict: 'removed' };
   }
   const saved = savedList.find((review) => review && review.id === pending.id);
-  const diskComment = String(disk.comment || '').trim();
-  const savedComment = String(saved?.comment || '').trim();
+  const diskComment = String(disk.comment || '');
+  const savedComment = String(saved?.comment || '');
   const draft = pending.comment == null ? '' : String(pending.comment);
-  const expected = String(pending.expectedComment ?? savedComment).trim();
-  if (draft.trim() === diskComment && diskComment === expected) {
+  const expected = String(pending.expectedComment ?? savedComment);
+  if (draft.trim() === diskComment.trim() && diskComment === expected) {
     return { pending: null, keepDraftId: null };
   }
   return {
