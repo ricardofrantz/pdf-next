@@ -85,9 +85,14 @@ function* occurrences(text, want, loose) {
     }
   }
   const needle = want.replace(/ /g, '');
+  // Without spaces, "in the wake" is also inside "within the wake". A loose
+  // match must therefore start and end at a word boundary.
+  const wordCharacter = (character) => /[\p{L}\p{N}]/u.test(character || '');
   let from = 0;
   while (needle && (from = compact.indexOf(needle, from)) >= 0) {
-    yield { start: map[from], end: map[from + needle.length - 1] + 1 };
+    const start = map[from];
+    const end = map[from + needle.length - 1] + 1;
+    if (!wordCharacter(text[start - 1]) && !wordCharacter(text[end])) yield { start, end };
     from += 1;
   }
 }
