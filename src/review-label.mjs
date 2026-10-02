@@ -56,45 +56,61 @@ export function reattachedReviewAnchor(previous, next, at, quote) {
   return { ...next, original };
 }
 
-function matchesContext(text, start, end, anchor) {
-  const prefix = normalizeReviewText(anchor?.prefix).slice(-48);
-  const suffix = normalizeReviewText(anchor?.suffix).slice(0, 48);
-  return (!prefix || text.slice(0, start).trimEnd().endsWith(prefix)) &&
-    (!suffix || text.slice(end).trimStart().startsWith(suffix));
+function matchesContext(text, start, end, anchor, loose = false) {
+  const squeeze = (value) => (loose ? value.replace(/ /g, '') : value);
+  const prefix = squeeze(normalizeReviewText(anchor?.prefix).slice(-48));
+  const suffix = squeeze(normalizeReviewText(anchor?.suffix).slice(0, 48));
+  return (!prefix || squeeze(text.slice(0, start).trimEnd()).endsWith(prefix)) &&
+    (!suffix || squeeze(text.slice(end).trimStart()).startsWith(suffix));
+}
+
+/// Yield each occurrence of `want` in `text`. The loose form ignores spaces,
+/// because PDF.js splits a word at a font change or inline math, and the
+/// page text then has a space that the selected text does not have.
+function* occurrences(text, want, loose) {
+  if (!loose) {
+    let from = 0;
+    while ((from = text.indexOf(want, from)) >= 0) {
+      yield { start: from, end: from + want.length };
+      from += 1;
+    }
+    return;
+  }
+  const map = [];
+  let compact = '';
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== ' ') {
+      compact += text[index];
+      map.push(index);
+    }
+  }
+  const needle = want.replace(/ /g, '');
+  let from = 0;
+  while (needle && (from = compact.indexOf(needle, from)) >= 0) {
+    yield { start: map[from], end: map[from + needle.length - 1] + 1 };
+    from += 1;
+  }
 }
 
 /// Locate a quote by exact text and captured context. Repeated matches stay
-/// unresolved unless context selects one candidate.
+/// unresolved unless context selects one candidate. A match that ignores
+/// spaces is used only when the quote has no exact occurrence.
 export function resolveReviewAnchor(pages, quote, anchor = {}) {
   const want = normalizeReviewText(quote);
   const list = (Array.isArray(pages) ? pages : []).map((item) => ({
     page: Number(item?.page), text: normalizeReviewText(item?.text),
   })).filter((item) => Number.isInteger(item.page) && item.page > 0);
   if (want.length < 2) return { status: 'unlocated' };
-  const scan = (items) => {
-    const found = [];
-    for (const item of items) {
-      let from = 0;
-      while ((from = item.text.indexOf(want, from)) >= 0) {
-        const end = from + want.length;
-        if (matchesContext(item.text, from, end, anchor)) {
-          found.push({ page: item.page, start: from, end });
-        }
-        from += 1;
-      }
+  const count = (loose) => list.reduce((total, item) => total + [...occurrences(item.text, want, loose)].length, 0);
+  const exactCount = count(false);
+  const loose = exactCount === 0;
+  const found = [];
+  for (const item of list) {
+    for (const { start, end } of occurrences(item.text, want, loose)) {
+      if (matchesContext(item.text, start, end, anchor, loose)) found.push({ page: item.page, start, end });
     }
-    return found;
-  };
-  const all = scan(list);
-  if (all.length === 1) return { status: 'located', ...all[0] };
-  if (all.length > 1) return { status: 'ambiguous' };
-  const rawCount = list.reduce((count, item) => {
-    let from = 0;
-    while ((from = item.text.indexOf(want, from)) >= 0) {
-      count += 1;
-      from += 1;
-    }
-    return count;
-  }, 0);
-  return { status: rawCount > 1 ? 'ambiguous' : 'unlocated' };
+  }
+  if (found.length === 1) return { status: 'located', ...found[0] };
+  if (found.length > 1) return { status: 'ambiguous' };
+  return { status: (loose ? count(true) : exactCount) > 1 ? 'ambiguous' : 'unlocated' };
 }

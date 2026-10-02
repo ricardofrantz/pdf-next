@@ -2098,12 +2098,11 @@ function pdfAnchorForSelection(range, pageNumber, quote) {
   let suffix = '';
   const layer = page?.querySelector('.textLayer');
   if (layer) {
-    const joined = collectTextParts(layer).joined;
-    const needle = normalizeReviewText(quote);
-    const index = joined.indexOf(needle);
-    if (index >= 0 && joined.indexOf(needle, index + 1) < 0) {
-      prefix = joined.slice(Math.max(0, index - 48), index);
-      suffix = joined.slice(index + needle.length, index + needle.length + 48);
+    const text = normalizeReviewText(collectTextParts(layer).joined);
+    const found = resolveReviewAnchor([{ page: pageNumber, text }], quote);
+    if (found.status === 'located') {
+      prefix = text.slice(Math.max(0, found.start - 48), found.start);
+      suffix = text.slice(found.end, found.end + 48);
     }
   }
   if (!position && !prefix && !suffix) return null;

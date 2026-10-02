@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 import { EventEmitter } from 'node:events';
-import { findNormalizedSpan, reviewLabel, resolveReviewAnchor, reviewAction, reviewStatus, reviewColor, sameReviewQuote, reattachedReviewAnchor } from '../src/review-label.mjs';
+import { findNormalizedSpan, normalizeReviewText, reviewLabel, resolveReviewAnchor, reviewAction, reviewStatus, reviewColor, sameReviewQuote, reattachedReviewAnchor } from '../src/review-label.mjs';
 import { mapCollapsedIndex, reconcilePendingComment, reconcilePendingComments } from '../src/review-sync.mjs';
 import {
   REVIEW_SIZE_DEFAULT,
@@ -1515,6 +1515,26 @@ assert.notEqual(reviewStateKey('a.pdf', 'r1'), reviewStateKey('b.pdf', 'r1'),
     { page: 9, text: 'an unrelated repeated phrase remains here' },
   ], 'repeated phrase', { position: { page: 2 }, prefix: '', suffix: '' }).status, 'ambiguous',
   'A quote still present on its former page is ambiguous if it also appears elsewhere.');
+}
+{
+  // PDF.js 6.3.289 text items for a pdflatex page with \emph{non}linear and
+  // $u_\tau$, joined with spaces as pdfReviewTextPages joins them.
+  const items = ['The', ' ', 'non', 'linear term dominates when the friction velocity', ' ', 'u', 'τ',
+    ' ', 'grows large. We', 'measure the Reynolds number', ' ', 'Re', 'τ', ' ', '= 180 in the channel.', '1'];
+  const pages = [{ page: 1, text: items.join(' ') }];
+  const word = resolveReviewAnchor(pages, 'The nonlinear term');
+  assert.equal(word.status, 'located', 'A quote across a font change inside a word is located.');
+  assert.equal(normalizeReviewText(pages[0].text).slice(word.start, word.end), 'the non linear term');
+  assert.equal(resolveReviewAnchor(pages, 'velocity uτ grows').status, 'located',
+    'A quote across inline math pieces is located.');
+  assert.equal(resolveReviewAnchor([{ page: 1, text: 'u τ and u τ' }], 'uτ').status, 'ambiguous',
+    'A repeated quote stays ambiguous when spaces are ignored.');
+  assert.deepEqual(resolveReviewAnchor([{ page: 1, text: 'ab and a b' }], 'ab'),
+    { status: 'located', page: 1, start: 0, end: 2 },
+    'An exact match wins over a match that ignores spaces.');
+  assert.equal(resolveReviewAnchor([{ page: 1, text: 'u τ here' }, { page: 2, text: 'u τ there' }], 'uτ', {
+    prefix: '', suffix: 'there',
+  }).status, 'located', 'Context still selects one candidate when spaces are ignored.');
 }
 assert.equal(mapCollapsedIndex('hello', 2), 2);
 assert.equal(mapCollapsedIndex('a  b', 1), 1);
