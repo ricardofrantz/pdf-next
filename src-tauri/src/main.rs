@@ -1856,9 +1856,6 @@ fn parse_store(text: &str) -> Result<ReviewFile, String> {
         if parsed.next_id < max_next {
             return Err("nextId must be greater than every existing review ID".into());
         }
-        for review in &parsed.reviews {
-            validate_review(review)?;
-        }
     } else {
         ensure_ids(&mut parsed.reviews)?;
         for (index, review) in parsed.reviews.iter_mut().enumerate() {
@@ -2238,6 +2235,13 @@ fn load_store(doc_path: &Path) -> Result<(PathBuf, ReviewFile), String> {
     };
     if let Ok(basename) = document_basename(doc_path) {
         adopt_reviews(&mut store, &basename, kind_for(doc_path));
+    }
+    // Format 3 is checked after adoption, so a record without `file` or
+    // `kind` gets this document's values first, as format 2 always did.
+    if migrated && store.migration_backup.is_none() {
+        for review in &store.reviews {
+            validate_review(review).map_err(|error| format!("review {}: {error}", review.id))?;
+        }
     }
     let legacy = doc_path
         .parent()
@@ -4480,6 +4484,39 @@ mod tests {
         let read = read_snapshot(&path);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(read.unwrap().unwrap().reviews[0].quote, "kept");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn format_three_records_without_file_or_kind_are_adopted() {
+        let dir = scratch("review_format_three_adopt");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        std::fs::write(
+            review_sidecar(&pdf),
+            r#"{"format":3,"revision":1,"nextId":2,"reviews":[{"id":"r1","at":{"page":1},"quote":"minimal","comment":"fix"}]}"#,
+        )
+        .unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let listed = list_reviews(pdf.to_str().unwrap(), &allowed).unwrap();
+        assert_eq!(listed.reviews[0].file, "paper.pdf");
+        assert_eq!(listed.reviews[0].kind, "pdf");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_invalid_format_three_record_is_named_in_the_error() {
+        let dir = scratch("review_format_three_invalid");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        std::fs::write(
+            review_sidecar(&pdf),
+            r#"{"format":3,"revision":1,"nextId":3,"reviews":[{"id":"r1","at":{"page":1},"quote":"ok"},{"id":"r2","at":{"page":1},"quote":"bad","status":"done"}]}"#,
+        )
+        .unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let error = list_reviews(pdf.to_str().unwrap(), &allowed).unwrap_err();
+        assert!(error.starts_with("review r2: status must be"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
