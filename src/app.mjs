@@ -1,8 +1,8 @@
 // pdf-next viewer. One file, one window, one job: show the document and keep
 // showing the newest version of it.
 import { bootIsFine, failures, mark } from './smoke.mjs';
-import { findNormalizedSpan, reviewIdNum, reviewLabel } from './review-label.mjs';
-import { mapCollapsedIndex, reconcilePendingComment } from './review-sync.mjs';
+import { findNormalizedSpan, normalizeReviewText, resolveReviewAnchor, reviewIdNum, reviewLabel, reviewAction, reviewStatus, reviewColor, sameReviewQuote, reattachedReviewAnchor } from './review-label.mjs';
+import { mapCollapsedIndex, reconcilePendingComment, reconcilePendingComments } from './review-sync.mjs';
 import { watchPdfRendering } from './pdf-rendering.mjs';
 import {
   REVIEW_SIZE_DEFAULT,
@@ -103,15 +103,21 @@ const ui = {
   note: el('note'),
   noteBox: el('noteBox'),
   noteRef: el('noteRef'),
+  noteQuote: el('noteQuote'),
+  noteAction: el('noteAction'),
   noteText: el('noteText'),
   noteSave: el('noteSave'),
   reviewPane: el('reviewPane'),
   reviewList: el('reviewList'),
+  reviewCount: el('reviewCount'),
+  reviewActionFilter: el('reviewActionFilter'),
+  reviewStatusFilter: el('reviewStatusFilter'),
   reviewSizeDown: el('reviewSizeDown'),
   reviewSizeUp: el('reviewSizeUp'),
   reviewChip: el('reviewChip'),
   reviewMenu: el('reviewMenu'),
   reviewMenuAdd: el('reviewMenuAdd'),
+  reviewMenuDelete: el('reviewMenuDelete'),
 };
 
 const state = {
@@ -148,7 +154,15 @@ const state = {
   // Blocks extracted from rendered markdown, per path: { path, texts: string[] }
   markdownBlocks: null,
   pendingNote: null,
+  pendingNotePdf: null,
   reviews: [],
+  nextId: 1,
+  reviewRevision: 0,
+  reviewDocumentPath: null,
+  reviewConflicts: new Map(),
+  reviewLocations: new Map(),
+  reviewActionFilter: 'all',
+  reviewStatusFilter: 'all',
   selectedReviewId: null,
   reviewOpen: false,
   reviewGrown: false,
@@ -590,7 +604,7 @@ function highlightChangedBlocks(indices, blocks) {
 // into, before the reader resizes it and the per-file memory takes over.
 const MARKDOWN_WINDOW_WIDTH = 780;
 const REVIEW_PANE_WIDTH = 280;
-const REVIEW_TINTS = 6;
+const REVIEW_TINTS = 16;
 const REVIEW_CHIP_MS = 500;
 const COMMENT_SAVE_MS = 400;
 
@@ -1098,6 +1112,7 @@ async function openFile(
   }
   if (state.file?.path !== file.path) {
     state.pendingNote = null;
+    state.pendingNotePdf = null;
     ui.noteBox.hidden = true;
     ui.noteText.value = '';
   }
@@ -2064,6 +2079,37 @@ function pageNear(node) {
   return Number.isFinite(page) && page >= 1 ? page : null;
 }
 
+function pdfAnchorForSelection(range, pageNumber, quote) {
+  const page = ui.viewer.querySelector(`.page[data-page-number="${pageNumber}"]`);
+  const pageView = pdfViewer.getPageView(pageNumber - 1);
+  const rect = range.getBoundingClientRect();
+  let position = null;
+  if (page && pageView?.viewport && pageView.pdfPage && rect) {
+    const pageRect = page.getBoundingClientRect();
+    const viewport = pageView.viewport;
+    const points = pageView.pdfPage.getViewport({ scale: 1, rotation: viewport.rotation });
+    position = {
+      page: pageNumber,
+      x: Math.max(0, (rect.left - pageRect.left) * points.width / viewport.width),
+      y: Math.max(0, (rect.top - pageRect.top) * points.height / viewport.height),
+    };
+  }
+  let prefix = '';
+  let suffix = '';
+  const layer = page?.querySelector('.textLayer');
+  if (layer) {
+    const joined = collectTextParts(layer).joined;
+    const needle = normalizeReviewText(quote);
+    const index = joined.indexOf(needle);
+    if (index >= 0 && joined.indexOf(needle, index + 1) < 0) {
+      prefix = joined.slice(Math.max(0, index - 48), index);
+      suffix = joined.slice(index + needle.length, index + needle.length + 48);
+    }
+  }
+  if (!position && !prefix && !suffix) return null;
+  return { prefix, suffix, documentRevision: state.file?.revision ?? null, ...(position ? { position } : {}) };
+}
+
 /// `{ line }` / `{ page }`, plus `end` when the range is more than one.
 function atRange(start, end, key) {
   if (start == null) {
@@ -2093,7 +2139,11 @@ function describeSelection() {
   if (state.file?.kind === 'pdf') {
     const start = pageNear(selection.getRangeAt(0).startContainer);
     const end = pageNear(selection.getRangeAt(selection.rangeCount - 1).endContainer);
-    return { file, kind: 'pdf', at: atRange(start, end, 'page'), quote };
+    const range = selection.getRangeAt(0);
+    return {
+      file, kind: 'pdf', at: atRange(start, end, 'page'), quote,
+      anchor: pdfAnchorForSelection(range, start, quote),
+    };
   }
   return null;
 }
@@ -2135,7 +2185,7 @@ function hasLocator(record) {
 
 let reviewAnchorRect = null;
 
-function openNoteBox() {
+function openNoteBox(action = 'improve') {
   const picked = describeSelection();
   const range = selectionInDocument();
   const rect =
@@ -2157,7 +2207,15 @@ function openNoteBox() {
   }
 
   state.pendingNote = picked;
+  state.pendingNotePdf = picked.kind === 'pdf' && state.document
+    ? { path: state.file.path, digestPromise: pdfDocumentDigest(state.document).catch(() => null) }
+    : null;
   ui.noteRef.textContent = formatSelection(picked);
+  ui.noteQuote.textContent = picked.quote;
+  ui.noteAction.value = action === 'delete' ? 'delete' : 'improve';
+  ui.noteText.value = '';
+  ui.noteText.placeholder = 'Instruction (optional comment for Delete)';
+  ui.noteText.hidden = false;
   ui.noteBox.hidden = false;
   placeNoteBox(rect);
   ui.noteText.focus({ preventScroll: true });
@@ -2177,43 +2235,114 @@ function placeNoteBox(rect) {
   placeFloating(ui.noteBox, Math.max(8, window.innerWidth / 2 - 130), Math.max(8, window.innerHeight / 3));
 }
 
+let noteSaveInFlight = false;
+
 async function saveNote() {
   if (!state.pendingNote || !state.file) {
     return;
   }
-  const path = state.file.path;
-  const generation = state.generation;
-
+  if (noteSaveInFlight) return;
+  const action = ui.noteAction.value === 'delete' ? 'delete' : 'improve';
   const comment = ui.noteText.value.trim();
-  const review = {
-    file: state.pendingNote.file,
-    kind: state.pendingNote.kind,
-    at: state.pendingNote.at,
-    quote: state.pendingNote.quote,
-    comment,
-  };
-
+  if (action === 'improve' && !comment) {
+    setStatus('Add an instruction for this improvement');
+    ui.noteText.focus();
+    return;
+  }
+  noteSaveInFlight = true;
+  ui.noteSave.disabled = true;
+  const selection = state.pendingNote;
+  const pdfSnapshot = state.pendingNotePdf;
+  const picked = structuredClone(selection);
+  const path = state.file.path;
   try {
+    let anchor = picked.anchor;
+    let source = null;
+    let sourceHintUnavailable = false;
+    if (picked.kind === 'pdf' && anchor?.position) {
+      const capturedPdf = pdfSnapshot?.path === path ? pdfSnapshot : null;
+      let digest;
+      try {
+        digest = capturedPdf ? await capturedPdf.digestPromise : await pdfDocumentDigest();
+        if (!digest) digest = 'unverified';
+      } catch {
+        digest = 'unverified';
+      }
+      if (state.file?.path !== path) return;
+      anchor = { ...anchor, documentRevision: digest };
+      source = digest.startsWith('sha256:')
+        ? await optionalSourceHint(path, anchor.position, digest)
+        : null;
+      sourceHintUnavailable = !source;
+      if (state.file?.path !== path) return;
+    }
+    const review = {
+      file: picked.file,
+      kind: picked.kind,
+      at: picked.at,
+      quote: picked.quote,
+      comment,
+      action,
+      status: 'open',
+      resolution: '',
+      color: ((Math.max(1, Number(state.nextId) || 1) - 1) % REVIEW_TINTS) + 1,
+      ...(anchor ? { anchor } : {}),
+      ...(source ? { source } : {}),
+    };
     const store = await invoke('append_review', {
       document: path,
       review,
     });
-    if (state.generation !== generation || state.file?.path !== path) {
+    if (state.file?.path !== path) {
       return;
     }
     applyReviewStore(store);
-    ui.noteBox.hidden = true;
-    ui.noteText.value = '';
+    if (state.pendingNote === selection && state.pendingNotePdf === pdfSnapshot) {
+      state.pendingNote = null;
+      state.pendingNotePdf = null;
+      ui.noteBox.hidden = true;
+      ui.noteText.value = '';
+    }
     await setReviewOpen(true);
     const added = store.reviews[store.reviews.length - 1];
     if (added?.id) {
       selectReview(added.id);
     }
-    setStatus('Review saved');
+    setStatus(sourceHintUnavailable
+      ? 'Review saved; source hint unavailable, PDF quote and location retained'
+      : 'Review saved');
   } catch (error) {
-    if (state.generation === generation && state.file?.path === path) {
+    if (state.file?.path === path) {
       setStatus(String(error), { error: true });
     }
+  } finally {
+    noteSaveInFlight = false;
+    if (ui.noteSave?.isConnected) ui.noteSave.disabled = false;
+  }
+}
+
+async function optionalSourceHint(path, position, expectedRevision) {
+  let timer = 0;
+  try {
+    const hint = await Promise.race([
+      invoke('review_source_hint', { document: path, position }),
+      new Promise((resolve) => { timer = window.setTimeout(() => resolve(null), 500); }),
+    ]);
+    if (hint && typeof hint.file === 'string' && Number.isInteger(hint.line) && hint.line > 0 &&
+        hint.documentRevision === expectedRevision) {
+      return {
+        file: hint.file, line: hint.line, method: hint.method,
+        verified: hint.verified === false ? false : hint.verified,
+        documentRevision: hint.documentRevision,
+      };
+    }
+    setStatus('Source hint unavailable; quote and PDF location will be saved');
+    return null;
+  } catch {
+    setStatus('Source hint unavailable; quote and PDF location will be saved');
+    return null;
+  } finally {
+    window.clearTimeout(timer);
   }
 }
 
@@ -2240,13 +2369,9 @@ async function askSelection() {
   }
 }
 
-function reviewListSignature(reviews) {
-  return reviews.map((review) => review.id).join('\n');
-}
-
 function reviewPaintSignature(reviews) {
   return reviews
-    .map((review) => `${review.id}\t${review.kind}\t${JSON.stringify(review.at)}\t${review.quote}`)
+    .map((review) => `${review.id}\t${review.kind}\t${JSON.stringify(review.at)}\t${review.quote}\t${review.action}\t${review.status}\t${review.color}\t${JSON.stringify(review.anchor)}`)
     .join('\n');
 }
 
@@ -2260,49 +2385,47 @@ function reviewRowById(id) {
 }
 
 let commentSaveTimer = 0;
-let pendingComment = null;
+let commentFlushPromise = null;
+const pendingComments = new Map();
 
-function applyReviewStore(store, { keepDraftId = null, draft = '' } = {}) {
+function commentDraftKey(path, id) {
+  return `${path}\u0000${id}`;
+}
+
+function reviewStateKey(path, id) {
+  return `${path}\u0000${id}`;
+}
+
+function draftsForPath(path) {
+  return new Map([...pendingComments.values()]
+    .filter((draft) => draft.path === path)
+    .map((draft) => [draft.id, draft]));
+}
+
+function applyReviewStore(store, { authoritative = false } = {}) {
   const reviews = Array.isArray(store?.reviews) ? store.reviews : [];
-  const sameList =
-    reviewListSignature(reviews) === reviewListSignature(state.reviews) &&
-    ui.reviewList.querySelector('.review-row');
+  const revision = Number(store?.revision);
+  if (!authoritative && state.reviewDocumentPath === state.file?.path && Number.isSafeInteger(revision) &&
+      revision < state.reviewRevision) {
+    void loadReviews({ fromDisk: true });
+    return false;
+  }
   const samePaint = reviewPaintSignature(reviews) === reviewPaintSignature(state.reviews);
   state.reviews = reviews;
-
-  if (sameList) {
-    for (const review of reviews) {
-      const row = reviewRowById(review.id);
-      if (!row) {
-        continue;
-      }
-      const quote = row.querySelector('.review-quote');
-      if (quote) {
-        quote.textContent = review.quote;
-      }
-      const comment = row.querySelector('.review-comment');
-      if (comment instanceof HTMLTextAreaElement && review.id !== keepDraftId) {
-        comment.value = review.comment || '';
-      }
-    }
-  } else {
-    renderReviewList();
-  }
-  if (keepDraftId) {
-    const comment = reviewRowById(keepDraftId)?.querySelector('.review-comment');
-    if (comment instanceof HTMLTextAreaElement) {
-      comment.value = draft;
-      comment.focus({ preventScroll: true });
-    }
-  }
+  state.nextId = Number.isSafeInteger(Number(store?.nextId)) && Number(store.nextId) > 0
+    ? Number(store.nextId)
+    : Math.max(1, ...reviews.map((review) => reviewIdNum(review.id) + 1));
+  state.reviewRevision = Number.isSafeInteger(revision) ? revision : 0;
+  state.reviewDocumentPath = state.file?.path || null;
+  renderReviewList();
   if (!samePaint) {
     paintReviewMarks();
   }
+  return true;
 }
 
 async function loadReviews({ fromDisk = false } = {}) {
   if (!state.file || (state.file.kind !== 'markdown' && state.file.kind !== 'pdf')) {
-    pendingComment = null;
     applyReviewStore({ reviews: [] });
     return;
   }
@@ -2313,29 +2436,41 @@ async function loadReviews({ fromDisk = false } = {}) {
     if (state.generation !== generation || state.file?.path !== path) {
       return;
     }
-    const diskReviews = Array.isArray(store?.reviews) ? store.reviews : [];
-    let keepDraftId = null;
-    let draft = '';
-    if (fromDisk) {
-      const next = reconcilePendingComment(pendingComment, diskReviews, state.reviews);
-      pendingComment = next.pending;
-      keepDraftId = next.keepDraftId;
-      draft = next.pending?.comment ?? '';
-      if (!next.pending) {
-        window.clearTimeout(commentSaveTimer);
-        commentSaveTimer = 0;
-      }
-    } else {
-      pendingComment = null;
-      window.clearTimeout(commentSaveTimer);
-      commentSaveTimer = 0;
+    if (state.reviewDocumentPath !== path) {
+      state.reviewConflicts.clear();
+      state.reviewLocations.clear();
     }
-    applyReviewStore(store, { keepDraftId, draft });
+    const diskReviews = Array.isArray(store?.reviews) ? store.reviews : [];
+    for (const key of state.reviewConflicts.keys()) {
+      if (key.startsWith(`${path}\u0000`)) state.reviewConflicts.delete(key);
+    }
+    const drafts = draftsForPath(path);
+    const originals = [...drafts.values()].map((draft) => draft.original).filter(Boolean);
+    const result = reconcilePendingComments(drafts, diskReviews, originals);
+    for (const [id, draft] of drafts) {
+      const key = commentDraftKey(path, id);
+      const stateKey = reviewStateKey(path, id);
+      const next = result.pending.get(id);
+      if (next) pendingComments.set(key, { ...draft, ...next });
+      else pendingComments.delete(key);
+      if (result.conflicts.has(id)) {
+        const disk = diskReviews.find((review) => review.id === id);
+        state.reviewConflicts.set(stateKey, {
+          reason: result.conflicts.get(id),
+          diskComment: disk ? String(disk.comment || '') : '',
+        });
+      }
+      else state.reviewConflicts.delete(stateKey);
+    }
+    applyReviewStore(store, { authoritative: true });
   } catch (error) {
     if (state.generation !== generation || state.file?.path !== path) {
       return;
     }
-    if (fromDisk && state.reviews.length) {
+    if (state.reviewDocumentPath === path) {
+      if (!/never opened|does not exist/i.test(String(error))) {
+        setStatus(`Review data temporarily unavailable: ${String(error)}`, { error: true });
+      }
       return;
     }
     applyReviewStore({ reviews: [] });
@@ -2351,27 +2486,86 @@ async function reloadReviewsFromDisk() {
 }
 
 function renderReviewList() {
+  const active = document.activeElement;
+  const activeTextarea = active?.matches?.('.review-comment') ? active : null;
+  const activeId = activeTextarea?.closest('.review-row')?.dataset.reviewId;
+  const selectionStart = activeTextarea?.selectionStart;
+  const selectionEnd = activeTextarea?.selectionEnd;
   ui.reviewList.textContent = '';
-  if (!state.reviews.length) {
+  const records = [...state.reviews];
+  for (const draft of draftsForPath(state.file?.path).values()) {
+    if (!records.some((review) => review.id === draft.id) && draft.original) {
+      records.push({ ...draft.original, comment: draft.comment, _draftOnly: true });
+    }
+  }
+  const visible = records.filter((review) =>
+    (state.reviewActionFilter === 'all' || (review.action || 'improve') === state.reviewActionFilter) &&
+    (state.reviewStatusFilter === 'all' || (review.status || 'open') === state.reviewStatusFilter));
+  ui.reviewCount.textContent = `${visible.length}/${records.length}`;
+  if (!visible.length) {
     const empty = document.createElement('p');
     empty.className = 'review-empty';
-    empty.textContent = 'No reviews yet — select text and press Enter.';
+    empty.textContent = records.length ? 'No reviews match these filters.' : 'No reviews yet — select text and press Enter.';
     ui.reviewList.append(empty);
     return;
   }
-  for (const review of state.reviews) {
+  for (const review of visible) {
     const row = document.createElement('article');
     row.className = 'review-row';
     row.dataset.reviewId = review.id;
-    row.dataset.reviewTint = String(reviewTint(review.id));
+    row.dataset.reviewTint = String(reviewTint(review));
+    row.dataset.action = review.action || 'improve';
+    row.dataset.status = review.status || 'open';
+    const stateKey = reviewStateKey(state.file?.path, review.id);
+    const conflict = state.reviewConflicts.get(stateKey);
+    if (conflict) row.classList.add('conflict');
+    if (review._draftOnly) row.classList.add('draft-only');
+    const locationStatus = state.reviewLocations.get(stateKey);
+    if (locationStatus && !['located', 'positioned', 'preserved'].includes(locationStatus)) {
+      row.classList.add('unlocated');
+    }
     if (review.id === state.selectedReviewId) {
       row.classList.add('on');
     }
 
     const loc = document.createElement('div');
     loc.className = 'review-loc';
-    loc.append(makeReviewBadge(review), document.createTextNode(formatSelection(review)));
+    const action = document.createElement('span');
+    action.className = 'review-action-label';
+    action.textContent = reviewAction(review) === 'delete' ? 'Delete selection' : 'Improve';
+    loc.append(makeReviewBadge(review), action, document.createTextNode(formatSelection(review)));
     row.append(loc);
+
+    const status = document.createElement('div');
+    status.className = 'review-status';
+    status.textContent = review._draftOnly
+      ? 'Removed on disk · your unsaved draft is preserved'
+      : `${reviewStatus(review)}${review.resolution ? ` · ${review.resolution}` : ''}`;
+    row.append(status);
+    if (locationStatus === 'preserved') {
+      const location = document.createElement('div');
+      location.className = 'review-location';
+      location.textContent = 'Applied deletion · original excerpt retained';
+      row.append(location);
+    } else if (locationStatus === 'positioned') {
+      const location = document.createElement('div');
+      location.className = 'review-location';
+      location.textContent = 'PDF position saved · text match unavailable';
+      row.append(location);
+    } else if (locationStatus && !['located', 'positioned', 'preserved'].includes(locationStatus)) {
+      const location = document.createElement('div');
+      location.className = 'review-location';
+      location.textContent = locationStatus === 'ambiguous'
+        ? 'Ambiguous match · not highlighted'
+        : 'Unlocated · not highlighted';
+      row.append(location);
+    }
+    if (conflict?.reason === 'changed') {
+      const diskValue = document.createElement('div');
+      diskValue.className = 'review-conflict-value';
+      diskValue.textContent = `On disk: ${conflict.diskComment ?? String(review.comment || '')}`;
+      row.append(diskValue);
+    }
 
     const quote = document.createElement('blockquote');
     quote.className = 'review-quote';
@@ -2381,7 +2575,8 @@ function renderReviewList() {
     const comment = document.createElement('textarea');
     comment.className = 'review-comment';
     comment.rows = 2;
-    comment.value = review.comment || '';
+    const pending = pendingComments.get(commentDraftKey(state.file?.path, review.id));
+    comment.value = pending?.comment ?? review.comment ?? '';
     comment.addEventListener('click', (event) => event.stopPropagation());
     comment.addEventListener('input', () => scheduleCommentSave(review.id, comment.value));
     comment.addEventListener('blur', () => {
@@ -2391,14 +2586,83 @@ function renderReviewList() {
 
     const actions = document.createElement('div');
     actions.className = 'review-actions';
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.textContent = 'Delete';
-    remove.addEventListener('click', (event) => {
-      event.stopPropagation();
-      void deleteReview(review.id);
-    });
-    actions.append(remove);
+    if (!review._draftOnly && state.file?.kind === 'pdf' &&
+        ['ambiguous', 'unlocated'].includes(locationStatus) && reviewStatus(review) === 'open') {
+      const reattach = document.createElement('button');
+      reattach.type = 'button';
+      reattach.textContent = 'Reattach selection';
+      reattach.addEventListener('pointerdown', (event) => event.preventDefault());
+      reattach.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void reattachReview(review);
+      });
+      actions.append(reattach);
+    }
+    if (review._draftOnly) {
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.textContent = 'Copy draft';
+      copy.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(review.comment || '');
+          setStatus('Draft copied');
+        } catch { setStatus('Clipboard refused the draft', { error: true }); }
+      });
+      const discard = document.createElement('button');
+      discard.type = 'button';
+      discard.textContent = 'Discard draft';
+      discard.addEventListener('click', (event) => {
+        event.stopPropagation();
+        discardReviewDraft(review.id);
+      });
+      actions.append(copy, discard);
+    } else if (conflict?.reason === 'changed') {
+      const useDisk = document.createElement('button');
+      useDisk.type = 'button';
+      useDisk.textContent = 'Use disk';
+      useDisk.addEventListener('click', (event) => {
+        event.stopPropagation();
+        discardReviewDraft(review.id);
+      });
+      const saveDraft = document.createElement('button');
+      saveDraft.type = 'button';
+      saveDraft.textContent = 'Save my draft';
+      saveDraft.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void saveDraftAfterConflict(review.id);
+      });
+      actions.append(useDisk, saveDraft);
+    }
+    if (!review._draftOnly && reviewStatus(review) === 'applied') {
+      const resolve = document.createElement('button');
+      resolve.type = 'button';
+      resolve.textContent = 'Resolve';
+      resolve.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void patchReview(review, { status: 'resolved' }, 'Review resolved');
+      });
+      actions.append(resolve);
+    } else if (!review._draftOnly && reviewStatus(review) === 'resolved') {
+      const reopen = document.createElement('button');
+      reopen.type = 'button';
+      reopen.textContent = 'Reopen';
+      reopen.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void patchReview(review, { status: 'open' }, 'Review reopened');
+      });
+      actions.append(reopen);
+    }
+    if (!review._draftOnly) {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = 'Remove review';
+      remove.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void deleteReview(review.id);
+      });
+      actions.append(remove);
+    }
     row.append(actions);
 
     row.addEventListener('click', () => {
@@ -2406,6 +2670,15 @@ function renderReviewList() {
       void jumpToReview(review);
     });
     ui.reviewList.append(row);
+  }
+  if (activeId) {
+    const textarea = reviewRowById(activeId)?.querySelector('.review-comment');
+    if (textarea instanceof HTMLTextAreaElement) {
+      textarea.focus({ preventScroll: true });
+      if (Number.isInteger(selectionStart) && Number.isInteger(selectionEnd)) {
+        textarea.setSelectionRange(selectionStart, selectionEnd);
+      }
+    }
   }
 }
 
@@ -2469,7 +2742,17 @@ function stepReviewSize(delta) {
 }
 
 function scheduleCommentSave(id, comment) {
-  pendingComment = { id, comment };
+  const path = state.file?.path;
+  const key = commentDraftKey(path, id);
+  const old = pendingComments.get(key);
+  const current = state.reviews.find((review) => review.id === id) || old?.original;
+  if (!path || !current) return;
+  pendingComments.set(key, {
+    id, path, comment,
+    expectedComment: old?.expectedComment ?? String(current.comment || ''),
+    original: old?.original || current,
+  });
+  state.reviewConflicts.delete(reviewStateKey(path, id));
   window.clearTimeout(commentSaveTimer);
   commentSaveTimer = window.setTimeout(() => {
     void flushCommentSave();
@@ -2479,74 +2762,175 @@ function scheduleCommentSave(id, comment) {
 async function flushCommentSave() {
   window.clearTimeout(commentSaveTimer);
   commentSaveTimer = 0;
-  const pending = pendingComment;
-  pendingComment = null;
-  if (!pending || !state.file) {
-    return;
+  if (commentFlushPromise) return commentFlushPromise;
+  commentFlushPromise = (async () => {
+    for (const pending of [...pendingComments.values()]) {
+      if (pending.path === state.file?.path && !state.reviews.some((review) => review.id === pending.id)) {
+        state.reviewConflicts.set(reviewStateKey(pending.path, pending.id), { reason: 'removed' });
+        renderReviewList();
+        continue;
+      }
+      if (String(pending.comment).trim() === String(pending.expectedComment).trim()) {
+        if (pendingComments.get(commentDraftKey(pending.path, pending.id)) === pending) {
+          pendingComments.delete(commentDraftKey(pending.path, pending.id));
+        }
+        continue;
+      }
+      await updateReviewComment(pending, { quiet: true });
+    }
+  })();
+  try {
+    await commentFlushPromise;
+  } finally {
+    commentFlushPromise = null;
   }
-  const current = state.reviews.find((review) => review.id === pending.id);
-  if (current && (current.comment || '') === pending.comment.trim()) {
-    return;
-  }
-  await updateReviewComment(pending.id, pending.comment, { quiet: true });
 }
 
-async function updateReviewComment(id, comment, { quiet = false } = {}) {
-  if (!state.file) {
-    return;
-  }
-  const path = state.file.path;
+async function updateReviewComment(pending, { quiet = false } = {}) {
+  const { id, path } = pending;
   const generation = state.generation;
+  const key = commentDraftKey(path, id);
   try {
-    const store = await invoke('update_review', { document: path, id, comment });
-    if (state.generation !== generation || state.file?.path !== path) {
-      return;
+    const store = await invoke('update_review', {
+      document: path, id, expectedComment: pending.expectedComment, comment: pending.comment.trim(),
+    });
+    const latest = pendingComments.get(key);
+    if (latest === pending) {
+      pendingComments.delete(key);
+    } else if (latest && latest.expectedComment === pending.expectedComment) {
+      pendingComments.set(key, { ...latest, expectedComment: pending.comment.trim() });
     }
-    const reviews = Array.isArray(store?.reviews) ? store.reviews : [];
-    state.reviews = reviews;
+    if (state.generation !== generation || state.file?.path !== path) return;
+    state.reviewConflicts.delete(reviewStateKey(path, id));
+    applyReviewStore(store);
     if (!quiet) {
       selectReview(id);
       setStatus('Review updated');
     }
   } catch (error) {
-    if (state.generation !== generation || state.file?.path !== path) {
-      return;
+    if (state.generation !== generation || state.file?.path !== path) return;
+    if (/conflict|changed|expected|not found/i.test(String(error))) {
+      state.reviewConflicts.set(reviewStateKey(path, id), { reason: /not found/i.test(String(error)) ? 'removed' : 'changed' });
+      await loadReviews({ fromDisk: true });
     }
-    if (/not found/i.test(String(error))) {
-      pendingComment = null;
-      return;
-    }
-    setStatus(String(error), { error: true });
+    setStatus(/conflict|changed|expected/i.test(String(error))
+      ? 'Review changed on disk; your draft is preserved for conflict resolution.'
+      : String(error), { error: true });
+    renderReviewList();
+    const textarea = reviewRowById(id)?.querySelector('.review-comment');
+    if (textarea instanceof HTMLTextAreaElement) textarea.value = pending.comment;
+    return false;
   }
+  return true;
 }
 
 async function deleteReview(id) {
   if (!state.file) {
     return;
   }
-  if (!window.confirm('Delete this review?')) {
+  if (!window.confirm('Remove this review? This only removes the review task.')) {
     return;
   }
   const path = state.file.path;
   const generation = state.generation;
   try {
-    const store = await invoke('delete_review', { document: path, id });
+    const expectedRecord = state.reviews.find((review) => review.id === id);
+    const store = await invoke('delete_review', { document: path, id, expectedRecord });
     if (state.generation !== generation || state.file?.path !== path) {
       return;
     }
-    if (pendingComment?.id === id) {
-      pendingComment = null;
-      window.clearTimeout(commentSaveTimer);
-      commentSaveTimer = 0;
-    }
+    pendingComments.delete(commentDraftKey(path, id));
     applyReviewStore(store);
     if (state.selectedReviewId === id) {
       state.selectedReviewId = null;
     }
-    setStatus('Review deleted');
+    setStatus('Review removed');
   } catch (error) {
     if (state.generation === generation && state.file?.path === path) {
       setStatus(String(error), { error: true });
+    }
+  }
+}
+
+async function patchReview(review, patch, message) {
+  if (!state.file) return;
+  const path = state.file.path;
+  const generation = state.generation;
+  const expected = Object.fromEntries(Object.keys(patch).map((key) => [
+    key, Object.hasOwn(review, key) ? review[key] : null,
+  ]));
+  try {
+    const store = await invoke('patch_review', { document: path, id: review.id, patch, expected });
+    if (state.generation !== generation || state.file?.path !== path) return;
+    applyReviewStore(store);
+    setStatus(message);
+  } catch (error) {
+    if (state.generation === generation && state.file?.path === path) {
+      setStatus(`Review update failed: ${String(error)}`, { error: true });
+    }
+  }
+}
+
+function discardReviewDraft(id) {
+  const path = state.file?.path;
+  if (!path) return;
+  pendingComments.delete(commentDraftKey(path, id));
+  state.reviewConflicts.delete(reviewStateKey(path, id));
+  renderReviewList();
+  setStatus('Draft discarded');
+}
+
+async function saveDraftAfterConflict(id) {
+  const path = state.file?.path;
+  const key = commentDraftKey(path, id);
+  const pending = pendingComments.get(key);
+  if (!path || !pending) return;
+  const generation = state.generation;
+  try {
+    const store = await invoke('read_reviews', { document: path });
+    if (state.generation !== generation || state.file?.path !== path) return;
+    const current = store?.reviews?.find((review) => review.id === id);
+    if (!current) {
+      state.reviewConflicts.set(reviewStateKey(path, id), { reason: 'removed' });
+      applyReviewStore(store, { authoritative: true });
+      setStatus('Review was removed on disk; draft is retained for copying.', { error: true });
+      return;
+    }
+    applyReviewStore(store, { authoritative: true });
+    const rebased = { ...pending, expectedComment: String(current.comment || '') };
+    pendingComments.set(key, rebased);
+    state.reviewConflicts.delete(reviewStateKey(path, id));
+    renderReviewList();
+    await updateReviewComment(rebased, { quiet: true });
+  } catch (error) {
+    if (state.generation === generation && state.file?.path === path) {
+      setStatus(`Could not refresh the review before saving your draft: ${String(error)}`, { error: true });
+    }
+  }
+}
+
+async function reattachReview(review) {
+  const path = state.file?.path;
+  const generation = state.generation;
+  if (!path || state.file?.kind !== 'pdf') return;
+  const picked = describeSelection();
+  if (!picked || picked.kind !== 'pdf' || !sameReviewQuote(review, picked.quote)) {
+    setStatus('Select the same quoted text in the PDF before reattaching', { error: true });
+    return;
+  }
+  if (!picked.anchor?.position) {
+    setStatus('The selected text has no PDF position to attach to', { error: true });
+    return;
+  }
+  try {
+    const digest = await pdfDocumentDigest();
+    if (state.generation !== generation || state.file?.path !== path) return;
+    const nextAnchor = reattachedReviewAnchor(review.anchor, picked.anchor, review.at, review.quote);
+    nextAnchor.documentRevision = digest;
+    await patchReview(review, { anchor: nextAnchor }, 'Review reattached to the selected PDF text');
+  } catch (error) {
+    if (state.generation === generation && state.file?.path === path) {
+      setStatus(`Could not reattach review: ${String(error)}`, { error: true });
     }
   }
 }
@@ -2563,13 +2947,8 @@ async function jumpToReview(review) {
   }
 }
 
-/// `r1` → 1, `r7` → 1 again. Stable for a given id, even after a delete.
-function reviewTint(id) {
-  const n = reviewIdNum(id);
-  if (n < 1) {
-    return 1;
-  }
-  return ((n - 1) % REVIEW_TINTS) + 1;
+function reviewTint(review) {
+  return typeof review === 'object' ? reviewColor(review, REVIEW_TINTS) : reviewColor({ id: review }, REVIEW_TINTS);
 }
 
 function makeReviewBadge(review) {
@@ -2577,7 +2956,7 @@ function makeReviewBadge(review) {
   badge.className = 'review-no';
   badge.textContent = reviewLabel(review, state.reviews);
   badge.dataset.reviewId = review.id;
-  badge.dataset.reviewTint = String(reviewTint(review.id));
+  badge.dataset.reviewTint = String(reviewTint(review));
   return badge;
 }
 
@@ -2613,8 +2992,9 @@ function placePdfBadge(page, anchor, review) {
       const other = Number.parseFloat(node.style.top);
       return Number.isFinite(other) && Math.abs(other - top) < 10;
     }).length;
-    badge.style.left = `${rect.right - pageRect.left + near * 26}px`;
-    badge.style.top = `${top}px`;
+    const baseLeft = rect.right - pageRect.left;
+    badge.style.left = `${Math.min(Math.max(0, page.clientWidth - 58), baseLeft + (near % 4) * 24)}px`;
+    badge.style.top = `${top + Math.floor(near / 4) * 18}px`;
   } else {
     badge.style.right = '8px';
     badge.style.top = '8px';
@@ -2634,7 +3014,9 @@ function applyReviewTint(el, id) {
     el.classList.add('review-block');
   }
   el.dataset.reviewId = id;
-  el.dataset.reviewTint = String(reviewTint(id));
+  const review = state.reviews.find((item) => item.id === id);
+  el.dataset.reviewTint = String(reviewTint(review || id));
+  if (reviewAction(review) === 'delete') el.dataset.reviewAction = 'delete';
 }
 
 function clearReviewTint(el) {
@@ -2644,6 +3026,7 @@ function clearReviewTint(el) {
   el.classList.remove('review-block', 'review', 'review-page');
   delete el.dataset.reviewId;
   delete el.dataset.reviewTint;
+  delete el.dataset.reviewAction;
 }
 
 function unwrapReviewMarks(root) {
@@ -2711,7 +3094,7 @@ function offsetsInPart(part, idx, end) {
 /// PDF uses a custom `<review-q>` — never a `<span>` — because PDF.js styles
 /// every textLayer span as `position:absolute`, and a nested span's
 /// background then paints the whole sentence box.
-function wrapQuoteFragments(root, quote, id, { asMark = false } = {}) {
+function wrapQuoteFragments(root, quote, id, { asMark = false, match = null } = {}) {
   const needle = String(quote || '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -2720,7 +3103,7 @@ function wrapQuoteFragments(root, quote, id, { asMark = false } = {}) {
     return null;
   }
   const { joined, parts } = collectTextParts(root);
-  const found = findNormalizedSpan(joined, needle);
+  const found = match || findNormalizedSpan(joined, needle);
   if (!found) {
     return null;
   }
@@ -2758,8 +3141,8 @@ function wrapQuoteFragments(root, quote, id, { asMark = false } = {}) {
   return first;
 }
 
-function wrapPdfQuote(layer, quote, id) {
-  return wrapQuoteFragments(layer, quote, id, { asMark: false });
+function wrapPdfQuote(layer, quote, id, match = null) {
+  return wrapQuoteFragments(layer, quote, id, { asMark: false, match });
 }
 
 function wrapQuoteIn(root, quote, id) {
@@ -2810,36 +3193,132 @@ function paintMarkdownMarks() {
   }
 }
 
-function paintPdfMarks() {
+let pdfReviewTextDocument = null;
+let pdfReviewTextPagesPromise = null;
+let pdfDigestDocument = null;
+let pdfDigestPromise = null;
+let pdfPaintSerial = 0;
+
+async function pdfDocumentDigest(pdf = state.document) {
+  if (!pdf) throw new Error('PDF is not open');
+  if (pdfDigestDocument === pdf && pdfDigestPromise) return pdfDigestPromise;
+  pdfDigestDocument = pdf;
+  pdfDigestPromise = (async () => {
+    const bytes = await pdf.getData();
+    const digest = await window.crypto.subtle.digest('SHA-256', bytes);
+    const hex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `sha256:${hex}`;
+  })();
+  try {
+    return await pdfDigestPromise;
+  } catch (error) {
+    if (pdfDigestDocument === pdf) {
+      pdfDigestDocument = null;
+      pdfDigestPromise = null;
+    }
+    throw error;
+  }
+}
+
+async function pdfReviewTextPages() {
+  const pdf = state.document;
+  if (!pdf) return [];
+  if (pdfReviewTextDocument === pdf && pdfReviewTextPagesPromise) return pdfReviewTextPagesPromise;
+  pdfReviewTextDocument = pdf;
+  pdfReviewTextPagesPromise = (async () => {
+    const pages = [];
+    for (let number = 1; number <= pdf.numPages; number += 1) {
+      const page = await pdf.getPage(number);
+      const content = await page.getTextContent();
+      pages.push({
+        page: number,
+        text: content.items.map((item) => item.str || '').join(' '),
+      });
+      if (pdf !== state.document) return [];
+    }
+    return pages;
+  })().catch(() => []);
+  return pdfReviewTextPagesPromise;
+}
+
+function placePdfBadgeAtPosition(page, review, position) {
+  const pageView = pdfViewer.getPageView(position.page - 1);
+  if (!pageView?.viewport) return;
+  const cssX = position.x * pageView.viewport.width / pageView.pdfPage.getViewport({
+    scale: 1, rotation: pageView.viewport.rotation,
+  }).width;
+  const cssY = position.y * pageView.viewport.height / pageView.pdfPage.getViewport({
+    scale: 1, rotation: pageView.viewport.rotation,
+  }).height;
+  const badge = makeReviewBadge(review);
+  const near = page.querySelectorAll(':scope > .review-no').length;
+  badge.style.left = `${Math.max(0, cssX + (near % 4) * 24)}px`;
+  badge.style.top = `${Math.max(0, cssY - 12 + Math.floor(near / 4) * 18)}px`;
+  page.append(badge);
+}
+
+async function paintPdfMarks() {
+  const generation = state.generation;
+  const pdf = state.document;
+  const serial = ++pdfPaintSerial;
+  let digest;
+  let textPages;
+  try {
+    [digest, textPages] = await Promise.all([pdfDocumentDigest(pdf), pdfReviewTextPages()]);
+  } catch {
+    return;
+  }
+  if (serial !== pdfPaintSerial || pdf !== state.document || generation !== state.generation || state.file?.kind !== 'pdf') return;
   for (const page of ui.viewer.querySelectorAll('.page')) {
     clearReviewBadges(page);
     clearReviewTint(page);
     unwrapReviewMarks(page.querySelector('.textLayer'));
   }
+  if (!textPages.length) return;
+  const locationUpdates = new Map();
   for (const review of state.reviews) {
     const start = review.at?.page;
-    if (!start) {
+    const anchor = review.anchor || { position: start ? { page: start } : null };
+    if (reviewAction(review) === 'delete' && ['applied', 'resolved'].includes(reviewStatus(review))) {
+      locationUpdates.set(reviewStateKey(state.file.path, review.id), 'preserved');
       continue;
     }
-    const end = Math.min(review.at.end || start, pdfViewer.pagesCount);
-    let placed = false;
-    for (let pageNum = start; pageNum <= end; pageNum += 1) {
-      const page = ui.viewer.querySelector(`.page[data-page-number="${pageNum}"]`);
-      const layer = page?.querySelector('.textLayer');
-      if (!layer) {
+    const resolved = resolveReviewAnchor(textPages, review.quote, anchor);
+    if (resolved.status !== 'located') {
+      const position = anchor.position;
+      const sameRevision = anchor.documentRevision != null && anchor.documentRevision === digest;
+      const page = position?.page && ui.viewer.querySelector(`.page[data-page-number="${position.page}"]`);
+      if (sameRevision && page) {
+        locationUpdates.set(reviewStateKey(state.file.path, review.id), 'positioned');
+        placePdfBadgeAtPosition(page, review, position);
+      } else {
+        locationUpdates.set(reviewStateKey(state.file.path, review.id), resolved.status);
+      }
+      continue;
+    }
+    locationUpdates.set(reviewStateKey(state.file.path, review.id), resolved.status);
+    const page = ui.viewer.querySelector(`.page[data-page-number="${resolved.page}"]`);
+    const layer = page?.querySelector('.textLayer');
+    if (!page) continue;
+    if (layer) {
+      const local = resolveReviewAnchor([{ page: resolved.page, text: collectTextParts(layer).joined }], review.quote, {
+        ...anchor, position: { ...anchor.position, page: resolved.page },
+      });
+      const first = local.status === 'located'
+        ? wrapPdfQuote(layer, review.quote, review.id, { start: local.start, end: local.end })
+        : null;
+      if (first) {
+        placePdfBadge(page, first, review);
         continue;
       }
-      const first = wrapPdfQuote(layer, review.quote, review.id);
-      if (first && !placed) {
-        placePdfBadge(page, first, review);
-        placed = true;
-      } else if (!first && !placed) {
-        applyReviewTint(page, review.id);
-        placePdfBadge(page, null, review);
-        placed = true;
-      }
+    }
+    const sameRevision = anchor.documentRevision != null && anchor.documentRevision === digest;
+    if (sameRevision && anchor.position?.page === resolved.page) {
+      placePdfBadgeAtPosition(page, review, anchor.position);
     }
   }
+  state.reviewLocations = locationUpdates;
+  renderReviewList();
 }
 
 function paintReviewMarks() {
@@ -3174,6 +3653,19 @@ ui.note.addEventListener('click', () => void openNoteBox());
 ui.notes.addEventListener('click', () => toggleReviewPanel());
 ui.reviewSizeDown.addEventListener('click', () => stepReviewSize(-1));
 ui.reviewSizeUp.addEventListener('click', () => stepReviewSize(1));
+ui.reviewActionFilter.addEventListener('change', () => {
+  state.reviewActionFilter = ui.reviewActionFilter.value;
+  renderReviewList();
+});
+ui.reviewStatusFilter.addEventListener('change', () => {
+  state.reviewStatusFilter = ui.reviewStatusFilter.value;
+  renderReviewList();
+});
+ui.noteAction.addEventListener('change', () => {
+  ui.noteText.placeholder = ui.noteAction.value === 'delete'
+    ? 'Optional reason (Enter to save)'
+    : 'Instruction (Enter to save)';
+});
 ui.reviewChip.addEventListener('pointerdown', (event) => {
   event.preventDefault();
 });
@@ -3182,6 +3674,8 @@ ui.reviewMenuAdd.addEventListener('pointerdown', (event) => {
   event.preventDefault();
 });
 ui.reviewMenuAdd.addEventListener('click', () => openNoteBox());
+ui.reviewMenuDelete.addEventListener('pointerdown', (event) => event.preventDefault());
+ui.reviewMenuDelete.addEventListener('click', () => openNoteBox('delete'));
 document.addEventListener('selectionchange', scheduleReviewChip);
 ui.container.addEventListener('contextmenu', onDocumentContextMenu);
 ui.markdownStage.addEventListener('contextmenu', onDocumentContextMenu);
@@ -3342,6 +3836,8 @@ ui.noteText.addEventListener('keydown', (event) => {
     hideReviewChrome();
     ui.noteBox.hidden = true;
     ui.noteText.value = '';
+    state.pendingNote = null;
+    state.pendingNotePdf = null;
   }
 });
 
@@ -3654,7 +4150,9 @@ listen('file-changed', async (event) => {
     return;
   }
   await openFile({ ...state.file, revision }, { preserveView: true });
+  if (state.file?.path !== path || state.file?.revision !== revision) return;
   setStatus('Reloaded');
+  if (launch?.smoke && state.file?.kind === 'pdf') void reportSmoke();
 });
 
 document.addEventListener('visibilitychange', async () => {
@@ -3938,6 +4436,9 @@ async function reportSmoke() {
     );
   };
   bootIsFine();
+  const reportGeneration = state.generation;
+  const reportPath = state.file?.path || null;
+  const currentReport = () => reportGeneration === state.generation && reportPath === state.file?.path;
   try {
     const file = state.file;
     if (!file) {
@@ -3950,6 +4451,7 @@ async function reportSmoke() {
     if (file.kind === 'pdf') {
       const pages = state.document?.numPages ?? 0;
       const painted = await renderedPixels();
+      if (!currentReport()) return;
       // Cross the canvas cap even on a 1x runner. A painted low-resolution
       // base without a completed detail canvas must not count as sharp.
       let sharp = false;
@@ -3957,8 +4459,10 @@ async function reportSmoke() {
       if (painted) {
         pdfViewer.currentScaleValue = '6';
         sharp = await settles(() => sharpPdfViewport(pdfViewer.getPageView(0)));
+        if (!currentReport()) return;
         if (sharp) {
           scroll.push(await smokePdfScroll());
+          if (!currentReport()) return;
           if (file.name === 'dense-page.pdf') {
             const descriptor = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
             try {
@@ -3970,6 +4474,7 @@ async function reportSmoke() {
                   throw new Error(`PDF stayed unsharp at ${density}x density`);
                 }
                 scroll.push(await smokePdfScroll());
+                if (!currentReport()) return;
               }
             } finally {
               if (descriptor) {
@@ -3982,11 +4487,42 @@ async function reportSmoke() {
           }
         }
       }
+      if (!currentReport()) return;
       const ok = pages > 0 && painted && sharp && failures.length === 0;
+      let revisionDetail = '';
+      if (ok) {
+        const digest = await pdfDocumentDigest();
+        if (!currentReport()) return;
+        const reviews = state.reviews;
+        const rows = [...ui.reviewList.querySelectorAll('.review-row')];
+        revisionDetail = `; reviewsCount=${reviews.length}`;
+        if (file.name === 'dense-page.pdf' && reviews.length > 0) {
+          const ids = new Set(reviews.map((review) => review.id));
+          const rowIds = new Set(rows.map((row) => row.dataset.reviewId));
+          const tints = new Set(rows.map((row) => Number(row.dataset.reviewTint)));
+          const serializedIds = new Set(reviews.filter((review) => typeof review.id === 'string').map((review) => review.id));
+          const agentExtensions = reviews.filter((review) =>
+            review.agentExtension?.token === `review-${review.id}` &&
+            review.source?.agentExtension?.token === `source-${review.id}`);
+          const expectedDenseReviews = reviews.every((review, index) =>
+            review.id === `r${index + 1}` &&
+            review.quote === `Scroll render ${index * 8}` &&
+            review.color === (index % 16) + 1 &&
+            review.source?.file === `chapter-${index + 1}.tex` &&
+            review.action === (index % 2 === 0 ? 'delete' : 'improve'));
+          if (reviews.length !== 32 || ids.size !== 32 || rowIds.size !== 32 ||
+              rows.length !== 32 || tints.size !== 16 || serializedIds.size !== 32 ||
+              state.nextId !== 33 || agentExtensions.length !== 32 || !expectedDenseReviews) {
+            throw new Error(`Dense review store failed integrity checks: reviews=${reviews.length}, rows=${rows.length}, ids=${ids.size}, tints=${tints.size}, extensions=${agentExtensions.length}`);
+          }
+          revisionDetail += `; uniqueRowIds=${rowIds.size}; uniqueTints=${tints.size}; serializedIds=${serializedIds.size}; agentExtensions=${agentExtensions.length}; nextId=${state.nextId}`;
+        }
+        revisionDetail += `; documentSha256=${digest.slice('sha256:'.length)}; sourceRevision=${file.revision}; reviewsRevision=${state.reviewRevision}`;
+      }
       await invoke('smoke_report', {
         ok,
         detail: ok
-          ? `${file.name} rendered sharply at 600%, ${pages} page${pages === 1 ? '' : 's'}; scroll=${JSON.stringify(scroll)}`
+          ? `${file.name} rendered sharply at 600%, ${pages} page${pages === 1 ? '' : 's'}; scroll=${JSON.stringify(scroll)}${revisionDetail}`
           : `${file.name} did not render sharply: ${pages} pages, painted=${painted}, sharp=${sharp}${note()}`,
       });
       return;
@@ -4009,6 +4545,7 @@ async function reportSmoke() {
         : `${file.name} did not render (${file.kind})${note()}`,
     });
   } catch (error) {
+    if (!currentReport()) return;
     await invoke('smoke_report', {
       ok: false,
       detail: `smoke check threw: ${error?.message || error}${note()}`,

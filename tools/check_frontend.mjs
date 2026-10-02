@@ -5,8 +5,8 @@ import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 import { EventEmitter } from 'node:events';
-import { findNormalizedSpan, reviewLabel } from '../src/review-label.mjs';
-import { mapCollapsedIndex, reconcilePendingComment } from '../src/review-sync.mjs';
+import { findNormalizedSpan, reviewLabel, resolveReviewAnchor, reviewAction, reviewStatus, reviewColor, sameReviewQuote, reattachedReviewAnchor } from '../src/review-label.mjs';
+import { mapCollapsedIndex, reconcilePendingComment, reconcilePendingComments } from '../src/review-sync.mjs';
 import {
   REVIEW_SIZE_DEFAULT,
   REVIEW_SIZE_STEPS,
@@ -275,6 +275,7 @@ for (const pauseAt of ['save', 'close']) {
   const pause = () => new Promise((resolve) => { finish = resolve; started(); });
   const close = appFunction('closeAll', 'function cycleTab(', {
     state,
+    noteSaveInFlight: false,
     flushCommentSave: pauseAt === 'save' ? pause : async () => {},
     invoke: pauseAt === 'close' ? pause : async () => {
       assert.fail('A superseded close must not clear the new watch target.');
@@ -313,37 +314,44 @@ for (const pauseAt of ['save', 'close']) {
 
 {
   const draft = { id: 'r1', comment: 'unsaved edit' };
+  const pendingComments = new Map([['a.pdf\u0000r1', { ...draft, path: 'a.pdf' }]]);
   const context = {
-    state: { file: { path: 'a.pdf' }, generation: 1 },
-    pendingComment: draft,
-    commentSaveTimer: 1,
+    state: { file: { path: 'a.pdf' }, generation: 1, reviews: [draft] },
+    pendingComments,
+    commentDraftKey: (path, id) => `${path}\u0000${id}`,
     window: { confirm: () => false, clearTimeout() {} },
     invoke: async () => { assert.fail('Canceled deletion must not write.'); },
+    applyReviewStore() {},
+    setStatus() {},
   };
   const remove = appFunction('deleteReview', 'async function jumpToReview(', context);
   await remove('r1');
-  assert.equal(context.pendingComment, draft, 'Canceling deletion must preserve the pending edit.');
-  assert.equal(context.commentSaveTimer, 1);
+  assert.equal(pendingComments.size, 1, 'Canceling removal preserves the pending edit.');
   context.window.confirm = () => true;
   context.invoke = async () => { throw new Error('permission denied'); };
   context.setStatus = () => {};
   await remove('r1');
-  assert.equal(context.pendingComment, draft, 'Failed deletion must preserve the pending edit.');
-  assert.equal(context.commentSaveTimer, 1);
+  assert.equal(pendingComments.size, 1, 'Failed removal preserves the pending edit.');
 }
 
 {
   const original = [{ id: 'b1', file: 'b.pdf' }];
-  const state = { file: { path: 'a.pdf' }, generation: 1, reviews: [] };
+  const state = { file: { path: 'a.pdf' }, generation: 1, reviews: [], reviewConflicts: new Set() };
+  const pending = { id: 'r1', path: 'a.pdf', comment: 'edited', expectedComment: 'old' };
+  const pendingComments = new Map([['a.pdf\u0000r1', pending]]);
   let finish;
   const update = appFunction('updateReviewComment', 'async function deleteReview(', {
     state,
-    pendingComment: null,
+    pendingComments,
+    commentDraftKey: (path, id) => `${path}\u0000${id}`,
     invoke: () => new Promise((resolve) => { finish = resolve; }),
     setStatus() {},
     selectReview() {},
+    applyReviewStore() {},
+    renderReviewList() {},
+    reviewRowById() { return null; },
   });
-  const updating = update('r1', 'edited', { quiet: true });
+  const updating = update(pending, { quiet: true });
   state.file = { path: 'b.pdf' };
   state.generation += 1;
   state.reviews = original;
@@ -353,23 +361,41 @@ for (const pauseAt of ['save', 'close']) {
 }
 
 {
+  let stateDigest;
   const state = {
     file: { path: 'a.pdf' }, generation: 1,
-    pendingNote: { file: 'a.pdf', kind: 'pdf', at: { page: 1 }, quote: 'text' },
+    pendingNote: { file: 'a.pdf', kind: 'pdf', at: { page: 1 }, quote: 'text', anchor: { position: { page: 1, x: 20, y: 30 } } },
+    pendingNotePdf: { path: 'a.pdf', document: {}, digestPromise: new Promise((resolve) => { stateDigest = resolve; }) },
   };
   let finish;
   let applied = false;
-  const save = appFunction('saveNote', '/// Ask is', {
+  let appended;
+  let statusMessage = '';
+  const save = appFunction('saveNote', 'async function optionalSourceHint(', {
     state,
-    ui: { noteText: { value: 'comment' }, noteBox: {} },
-    invoke: () => new Promise((resolve) => { finish = resolve; }),
+    noteSaveInFlight: false,
+    structuredClone: (value) => JSON.parse(JSON.stringify(value)),
+    REVIEW_TINTS: 16,
+    ui: { noteText: { value: 'comment' }, noteAction: { value: 'improve' }, noteSave: {}, noteBox: {}, noteQuote: {}, noteRef: {} },
+    pdfDocumentDigest: async () => 'sha256:wrong-current-document',
+    optionalSourceHint: async () => null,
+    invoke: (_command, args) => {
+      if (_command === 'append_review') { appended = args.review; return new Promise((resolve) => { finish = resolve; }); }
+      return null;
+    },
     applyReviewStore() { applied = true; },
     setReviewOpen() {},
     selectReview() {},
-    setStatus() {},
+    setStatus(message) { statusMessage = message; },
   });
+  state.generation += 1;
+  state.file.revision = 2;
   const saving = save();
-  state.file = { path: 'b.pdf' };
+  state.generation += 1;
+  stateDigest('sha256:captured-original-document');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(appended?.anchor?.documentRevision, 'sha256:captured-original-document', `A same-path rebuild keeps the digest captured with the selection. ${statusMessage}`);
+  state.file.path = 'b.pdf';
   state.generation += 1;
   finish({ reviews: [{ id: 'r1', file: 'a.pdf' }] });
   await saving;
@@ -377,11 +403,24 @@ for (const pauseAt of ['save', 'close']) {
 }
 
 {
-  const state = { reviews: [{ id: 'r1', at: { page: 1, end: 4_294_967_295 } }] };
+  const state = {
+    file: { kind: 'pdf', revision: 1 }, reviewLocations: new Map(), generation: 1,
+    reviews: [{ id: 'r1', at: { page: 1, end: 4_294_967_295 }, quote: 'quote' }],
+  };
   let visited = 0;
   const paint = appFunction('paintPdfMarks', 'function paintReviewMarks(', {
     state,
+    pdfPaintSerial: 0,
+    reviewStateKey: (path, id) => `${path}\u0000${id}`,
+    pdfDocumentDigest: async () => 'sha256:test',
+    reviewAction,
+    reviewStatus,
+    resolveReviewAnchor,
+    renderReviewList() {},
     pdfViewer: { pagesCount: 3 },
+    pdfReviewTextPages: async () => [
+      { page: 1, text: 'quote' }, { page: 2, text: 'other' }, { page: 3, text: 'else' },
+    ],
     ui: { viewer: {
       querySelectorAll: () => [],
       querySelector: () => {
@@ -391,8 +430,8 @@ for (const pauseAt of ['save', 'close']) {
       },
     } },
   });
-  paint();
-  assert.equal(visited, 3);
+  await paint();
+  assert.equal(visited, 1, 'The stored end page cannot expand work beyond its unique text match.');
 }
 
 {
@@ -1259,6 +1298,20 @@ assert.match(
   /listen\('reviews-changed'[\s\S]*?reloadReviewsFromDisk\(\)/,
   'An external sidecar edit must refresh reviews without reloading the document.',
 );
+assert.match(app, /await openFile\(\{ \.\.\.state\.file, revision \}, \{ preserveView: true \}\);[\s\S]*?state\.file\?\.kind === 'pdf'[\s\S]*?reportSmoke\(\)/,
+  'A completed PDF watcher reload reports its final revision to the held native smoke harness.');
+assert.match(app, /documentSha256=\$\{digest\.slice\('sha256:'\.length\)\}; sourceRevision=\$\{file\.revision\}; reviewsRevision=\$\{state\.reviewRevision\}/,
+  'Native reload reports include the PDF digest, file revision, and sidecar revision.');
+assert.match(app, /reviewsCount=\$\{reviews\.length\}/,
+  'Native readiness reports how many review rows were loaded.');
+assert.match(app, /uniqueRowIds=\$\{rowIds\.size\}; uniqueTints=\$\{tints\.size\}; serializedIds=\$\{serializedIds\.size\}; agentExtensions=\$\{agentExtensions\.length\}; nextId=\$\{state\.nextId\}/,
+  'Dense native readiness reports stable row IDs, all tints, preserved extensions, and next ID.');
+assert.match(app, /textContent = 'Reattach selection'[\s\S]*?pointerdown'[\s\S]*?preventDefault\(\)[\s\S]*?sameReviewQuote/,
+  'Manual reattachment keeps the PDF text selection and accepts only the original quote.');
+assert.match(app, /textContent = 'Use disk'[\s\S]*?textContent = 'Save my draft'[\s\S]*?expectedComment: String\(current\.comment \|\| ''\)/,
+  'Same-field conflicts require an explicit choice before the user draft is rebased.');
+assert.match(app, /textContent = 'Copy draft'[\s\S]*?textContent = 'Discard draft'/,
+  'A draft for a removed record can be copied or discarded without recreating the review.');
 assert.match(
   app,
   /async function reloadReviewsFromDisk\(\) \{\s*await loadReviews\(\{ fromDisk: true \}\)/,
@@ -1375,6 +1428,73 @@ assert.deepEqual(
   { start: 4, end: 32 },
 );
 assert.equal(findNormalizedSpan('nope', 'missing phrase here'), null);
+assert.equal(findNormalizedSpan('repeat quote repeat quote', 'repeat quote'), null,
+  'A repeated full quote is ambiguous; never fall back to its first occurrence.');
+assert.deepEqual(reviewLabel({ id: 'r17', at: { page: 4 } }, []), 'r17',
+  'Review badges use stable IDs, independent of location and list order.');
+assert.equal(reviewAction({ comment: 'please delete this' }), 'improve',
+  'Legacy comments never imply the Delete action.');
+assert.equal(reviewStatus({}), 'open', 'Legacy reviews remain open until explicitly changed.');
+assert.equal(sameReviewQuote({ quote: ' A selected phrase ' }, 'a  selected phrase'), true);
+assert.equal(sameReviewQuote({ quote: 'original phrase' }, 'different phrase'), false,
+  'Manual reattachment cannot silently change the requested text.');
+{
+  const oldAnchor = { prefix: 'before', position: { page: 1, x: 10, y: 20 } };
+  const nextAnchor = reattachedReviewAnchor(oldAnchor, {
+    prefix: 'new before', position: { page: 3, x: 30, y: 40 },
+  }, { page: 1 }, 'original phrase');
+  assert.equal(nextAnchor.position.page, 3);
+  assert.deepEqual(nextAnchor.original, {
+    anchor: oldAnchor, at: { page: 1 }, quote: 'original phrase',
+  }, 'Manual reattachment retains the original quote, location, and anchor.');
+}
+assert.equal(reviewColor({ id: 'r17', color: 5 }), 5, 'Persisted colors survive reorder and reload.');
+assert.equal(reviewColor({ id: 'r17' }), 1, 'Legacy colors have a stable deterministic fallback.');
+assert.equal(new Set(Array.from({ length: 16 }, (_, i) => reviewColor({ id: `r${i + 1}` })).slice(0, 16)).size, 16);
+assert.equal(new Set(Array.from({ length: 30 }, (_, i) => reviewColor({ id: `r${i + 1}` })).slice(0, 16)).size, 16,
+  'Thirty reviews can use every available tint while stable IDs keep badge identity.');
+const thirtyIds = Array.from({ length: 30 }, (_, i) => ({ id: `r${i + 1}` }));
+assert.equal(new Set(thirtyIds.map((review) => reviewLabel(review, thirtyIds))).size, 30,
+  'Thirty review badges remain individually addressable.');
+assert.equal(new Set([...thirtyIds].reverse().map((review) => `${review.id}:${reviewColor(review)}`)).size, 30,
+  'Stable review color assignments do not depend on list order.');
+const reviewStateKey = appFunction('reviewStateKey', 'function draftsForPath(', {});
+assert.notEqual(reviewStateKey('a.pdf', 'r1'), reviewStateKey('b.pdf', 'r1'),
+  'Review conflicts and location state are isolated by document path.');
+{
+  const hint = appFunction('optionalSourceHint', '/// Ask is', {
+    invoke: async () => ({ file: 'chapters/main.tex', line: 14, method: 'synctex', verified: false,
+      documentRevision: 'sha256:abc' }),
+    window: { setTimeout: () => 1, clearTimeout() {} },
+    setStatus() {},
+  });
+  const value = await hint('paper.pdf', { page: 1, x: 36, y: 72 }, 'sha256:abc');
+  assert.equal(value.verified, false, 'Source hints remain explicitly unverified.');
+  assert.equal(value.documentRevision, 'sha256:abc');
+}
+{
+  const pages = [
+    { page: 2, text: 'start alpha repeated phrase end. second repeated phrase elsewhere.' },
+    { page: 8, text: 'before repeated phrase after' },
+  ];
+  assert.deepEqual(resolveReviewAnchor(pages, 'repeated phrase', {
+    position: { page: 2, x: 36, y: 72 }, prefix: 'start alpha ', suffix: ' end.',
+  }), { status: 'located', page: 2, start: 12, end: 27 });
+  assert.deepEqual(resolveReviewAnchor(pages, 'repeated phrase', {
+    position: { page: 2, x: 36, y: 72 }, prefix: 'before ', suffix: ' after',
+  }), { status: 'located', page: 8, start: 7, end: 22 });
+  assert.equal(resolveReviewAnchor(pages, 'repeated phrase', {
+    position: { page: 2 }, prefix: 'no matching context ', suffix: 'missing',
+  }).status, 'ambiguous');
+  assert.equal(resolveReviewAnchor(pages, 'deleted passage', {
+    position: { page: 2 }, prefix: '', suffix: '',
+  }).status, 'unlocated');
+  assert.equal(resolveReviewAnchor([
+    { page: 2, text: 'the selected repeated phrase remains here' },
+    { page: 9, text: 'an unrelated repeated phrase remains here' },
+  ], 'repeated phrase', { position: { page: 2 }, prefix: '', suffix: '' }).status, 'ambiguous',
+  'A quote still present on its former page is ambiguous if it also appears elsewhere.');
+}
 assert.equal(mapCollapsedIndex('hello', 2), 2);
 assert.equal(mapCollapsedIndex('a  b', 1), 1);
 assert.equal(mapCollapsedIndex('a  b', 2), 3);
@@ -1383,9 +1503,10 @@ assert.equal(mapCollapsedIndex('a  b', 2), 3);
   const draft = { id: 'r1', comment: 'typing' };
   assert.equal(
     reconcilePendingComment(draft, [{ id: 'r2', comment: 'keep' }], saved).keepDraftId,
-    null,
-    'Agent delete of the draft id drops the draft.',
+    'r1',
+    'Agent deletion preserves an orphaned draft for recovery.',
   );
+  assert.equal(reconcilePendingComment(draft, [{ id: 'r2', comment: 'keep' }], saved).conflict, 'removed');
   assert.equal(
     reconcilePendingComment(
       draft,
@@ -1395,8 +1516,8 @@ assert.equal(mapCollapsedIndex('a  b', 2), 3);
       ],
       saved,
     ).keepDraftId,
-    null,
-    'Agent edit of that comment drops the draft.',
+    'r1',
+    'Agent edit of that comment preserves the draft for conflict resolution.',
   );
   assert.equal(
     reconcilePendingComment(
@@ -1411,6 +1532,113 @@ assert.equal(mapCollapsedIndex('a  b', 2), 3);
     'Agent edit of another id keeps the in-progress comment.',
   );
 }
+{
+  const state = { file: { path: 'a.pdf' }, generation: 2, reviews: [], reviewConflicts: new Map() };
+  const pending = { id: 'r4', path: 'a.pdf', comment: 'mine', expectedComment: 'original' };
+  const key = 'a.pdf\u0000r4';
+  const pendingComments = new Map([[key, pending]]);
+  let args;
+  const update = appFunction('updateReviewComment', 'async function deleteReview(', {
+    state, pendingComments,
+    HTMLTextAreaElement: class {},
+    commentDraftKey: (path, id) => `${path}\u0000${id}`,
+    reviewStateKey: (path, id) => `${path}\u0000${id}`,
+    invoke: async (_command, payload) => {
+      args = payload;
+      throw new Error('review comment conflict');
+    },
+    loadReviews: async () => {},
+    setStatus() {}, renderReviewList() {}, reviewRowById() { return null; },
+  });
+  assert.equal(await update(pending, { quiet: true }), false);
+  assert.equal(JSON.stringify(args), JSON.stringify({
+    document: 'a.pdf', id: 'r4', expectedComment: 'original', comment: 'mine',
+  }));
+  assert.equal(pendingComments.get(key), pending, 'A same-field conflict keeps the unsaved draft.');
+  assert.equal(state.reviewConflicts.get(key).reason, 'changed');
+}
+{
+  const pending = new Map([
+    ['r1', { id: 'r1', comment: 'mine 1', expectedComment: 'old 1' }],
+    ['r2', { id: 'r2', comment: 'mine 2', expectedComment: 'old 2' }],
+  ]);
+  const result = reconcilePendingComments(pending, [
+    { id: 'r1', comment: 'agent 1' }, { id: 'r2', comment: 'old 2' },
+  ], [{ id: 'r1', comment: 'old 1' }, { id: 'r2', comment: 'old 2' }]);
+  assert.equal(result.pending.size, 2, 'One external edit must not discard another pending row.');
+  assert.equal(result.conflicts.has('r1'), true, 'Same-field edits are reported as conflicts.');
+  assert.equal(result.conflicts.has('r2'), false, 'Independent draft remains saveable.');
+}
+{
+  const pending = { id: 'r1', path: 'a.pdf', comment: 'mine', expectedComment: 'old', original: { id: 'r1' } };
+  const pendingComments = new Map([['a.pdf\u0000r1', pending]]);
+  const state = { file: { path: 'a.pdf' }, generation: 1, reviewConflicts: new Map() };
+  let retry;
+  const saveDraft = appFunction('saveDraftAfterConflict', 'async function reattachReview(', {
+    state, pendingComments,
+    commentDraftKey: (path, id) => `${path}\u0000${id}`,
+    reviewStateKey: (path, id) => `${path}\u0000${id}`,
+    invoke: async () => ({ reviews: [{ id: 'r1', comment: 'agent' }] }),
+    applyReviewStore() {}, renderReviewList() {},
+    updateReviewComment: async (draft) => { retry = draft; return true; },
+    setStatus() {},
+  });
+  await saveDraft('r1');
+  assert.equal(retry.expectedComment, 'agent', 'Explicit Save my draft uses the refreshed disk comment for CAS.');
+  assert.equal(retry.comment, 'mine');
+}
+{
+  const pending = { id: 'r1', path: 'a.pdf', comment: 'mine', expectedComment: 'old', original: { id: 'r1', quote: 'audit quote' } };
+  const pendingComments = new Map([['a.pdf\u0000r1', pending]]);
+  const state = { file: { path: 'a.pdf' }, generation: 1, reviewConflicts: new Map() };
+  let updated = false;
+  const saveDraft = appFunction('saveDraftAfterConflict', 'async function reattachReview(', {
+    state, pendingComments,
+    commentDraftKey: (path, id) => `${path}\u0000${id}`,
+    reviewStateKey: (path, id) => `${path}\u0000${id}`,
+    invoke: async () => ({ reviews: [] }),
+    applyReviewStore() {}, renderReviewList() {},
+    updateReviewComment: async () => { updated = true; },
+    setStatus() {},
+  });
+  await saveDraft('r1');
+  assert.equal(updated, false, 'An explicitly removed record is never recreated by saving its draft.');
+  assert.equal(pendingComments.get('a.pdf\u0000r1'), pending, 'The removed record keeps its quote and draft for copying.');
+  assert.equal(state.reviewConflicts.get('a.pdf\u0000r1').reason, 'removed');
+}
+{
+  const pending = { id: 'r1', path: 'a.pdf', comment: 'saved edit', expectedComment: 'saved edit', original: { id: 'r1', comment: 'old' } };
+  const pendingComments = new Map([['a.pdf\u0000r1', pending]]);
+  const state = {
+    file: { path: 'a.pdf', kind: 'pdf' }, generation: 1, reviewDocumentPath: 'a.pdf',
+    reviewConflicts: new Map(), reviewLocations: new Map(), reviews: [],
+  };
+  const load = appFunction('loadReviews', '/// Disk first.', {
+    state, pendingComments,
+    commentDraftKey: (path, id) => `${path}\u0000${id}`,
+    reviewStateKey: (path, id) => `${path}\u0000${id}`,
+    draftsForPath: () => new Map([['r1', pending]]),
+    reconcilePendingComments,
+    invoke: async () => ({ revision: 2, reviews: [{ id: 'r1', comment: 'saved edit' }] }),
+    applyReviewStore() {}, setStatus() {},
+  });
+  await load();
+  assert.equal(pendingComments.has('a.pdf\u0000r1'), false, 'A draft reconciled to the saved disk value is removed from the pending map.');
+}
+{
+  const state = { file: { path: 'a.pdf' }, reviewDocumentPath: 'a.pdf', reviewRevision: 8, reviews: [] };
+  let reloads = 0;
+  const apply = appFunction('applyReviewStore', 'async function loadReviews(', {
+    state, reviewPaintSignature: () => '', loadReviews() { reloads += 1; },
+    reviewIdNum: () => 1,
+    renderReviewList() {}, paintReviewMarks() {},
+  });
+  assert.equal(apply({ revision: 7, reviews: [] }), false, 'A late mutation response cannot roll the panel back behind a newer watcher read.');
+  assert.equal(reloads, 1, 'A stale mutation response triggers one authoritative reread.');
+  assert.equal(apply({ revision: 2, reviews: [{ id: 'r1' }] }, { authoritative: true }), true,
+    'An authoritative disk read can represent a reset/imported revision counter.');
+  assert.equal(state.reviewRevision, 2);
+}
 assert.match(page, /id="reviewMenu"/, 'Right-click on a selection adds a review.');
 assert.match(
   app,
@@ -1419,8 +1647,8 @@ assert.match(
 );
 assert.match(
   app,
-  /function reviewTint\(id\)[\s\S]*?REVIEW_TINTS/,
-  'Review marks cycle a fixed set of tints from the record id.',
+  /function reviewTint\(review\)[\s\S]*?REVIEW_TINTS/,
+  'Review marks use the persisted color from the record.',
 );
 assert.match(
   app,
@@ -1449,8 +1677,8 @@ assert.match(
 );
 assert.match(
   styles,
-  /\[data-review-tint='1'\][\s\S]*?\[data-review-tint='6'\]/,
-  'Six review tints, cycled onto the mark and the panel row.',
+  /\[data-review-tint='1'\][\s\S]*?\[data-review-tint='16'\]/,
+  'Sixteen review tints are available in light and dark themes.',
 );
 assert.match(
   app,
@@ -1466,21 +1694,21 @@ assert.match(styles, /\.review-no/, 'Each highlighted block carries its 1.1 numb
     { id: 'r4', at: { page: 2 } },
     { id: 'r5', at: { page: 2 } },
   ];
-  assert.equal(reviewLabel(pages[0], pages), '1.1');
-  assert.equal(reviewLabel(pages[1], pages), '1.2');
-  assert.equal(reviewLabel(pages[2], pages), '1.3');
-  assert.equal(reviewLabel(pages[3], pages), '2.1');
-  assert.equal(reviewLabel(pages[4], pages), '2.2');
+  assert.equal(reviewLabel(pages[0], pages), 'r1');
+  assert.equal(reviewLabel(pages[1], pages), 'r2');
+  assert.equal(reviewLabel(pages[2], pages), 'r3');
+  assert.equal(reviewLabel(pages[3], pages), 'r4');
+  assert.equal(reviewLabel(pages[4], pages), 'r5');
   const afterDelete = pages.filter((review) => review.id !== 'r2');
-  assert.equal(reviewLabel(afterDelete[1], afterDelete), '1.2');
+  assert.equal(reviewLabel(afterDelete[1], afterDelete), 'r3');
   const md = [
     { id: 'r1', at: { line: 12 } },
     { id: 'r2', at: { line: 12 } },
     { id: 'r3', at: { line: 40 } },
   ];
-  assert.equal(reviewLabel(md[0], md), '1.1');
-  assert.equal(reviewLabel(md[1], md), '1.2');
-  assert.equal(reviewLabel(md[2], md), '2.1');
+  assert.equal(reviewLabel(md[0], md), 'r1');
+  assert.equal(reviewLabel(md[1], md), 'r2');
+  assert.equal(reviewLabel(md[2], md), 'r3');
 }
 assert.match(
   app,

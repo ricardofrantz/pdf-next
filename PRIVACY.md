@@ -2,6 +2,10 @@
 
 pdf-next reads the documents you open and their review sidecars. When you
 navigate an image folder, it lists neighboring files and opens the one you select.
+For a PDF review, it checks for a matching `.tex` entry point and optional
+`.synctex` or `.synctex.gz` mapping beside the PDF. If SyncTeX is installed, it
+queries that local mapping for a source-file and line hint. It does not open an
+editor or change the LaTeX source.
 
 **Network.** A few seconds after launch the app sends one request to
 `api.github.com` to learn the latest release version, and it sends the same
@@ -14,7 +18,10 @@ it may reach, so this is enforced by the browser engine, not just promised.
 **Storage.** The app saves your page appearance, poll interval, raw Markdown
 preference, and review text size in local browser storage. Tab paths, zoom,
 and scroll positions stay in memory for the current session. Reviews are saved
-beside the document as `{stem}_review.json`. The Reduce button can write
+beside the document as `{stem}_review.json`, with a transaction `.json.lock`
+file and a last-valid `.json.bak` backup. A legacy migration also keeps a
+`.json.pre-v3.bak` copy. Source hints and agent build results stay in the sidecar.
+The Reduce button can write
 `{stem}_reduced.pdf` beside the original. There is no account, telemetry,
 crash reporting, or analytics.
 

@@ -6,6 +6,9 @@
 // live in the frontend.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod review_command;
+mod review_source;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -1563,6 +1566,60 @@ struct ReviewAt {
     page: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     end: Option<u32>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+struct ReviewPosition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    y: Option<f64>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+struct ReviewAnchor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    suffix: Option<String>,
+    #[serde(
+        default,
+        rename = "documentRevision",
+        skip_serializing_if = "Option::is_none"
+    )]
+    document_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    position: Option<ReviewPosition>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+struct ReviewDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pdf: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tex: Option<String>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+fn review_action_default() -> String {
+    "improve".into()
+}
+
+fn review_status_default() -> String {
+    "open".into()
 }
 
 /// One review record. Markdown and PDF share these keys; only `at` differs.
@@ -1580,6 +1637,26 @@ struct Review {
     quote: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     comment: String,
+    #[serde(default = "review_action_default")]
+    action: String,
+    #[serde(default = "review_status_default")]
+    status: String,
+    #[serde(default)]
+    resolution: String,
+    #[serde(default = "default_review_color")]
+    color: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anchor: Option<ReviewAnchor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build: Option<serde_json::Value>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+fn default_review_color() -> u8 {
+    1
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1587,7 +1664,17 @@ struct ReviewFile {
     #[serde(default = "review_format_2")]
     format: u32,
     #[serde(default)]
+    revision: u64,
+    #[serde(default, rename = "nextId")]
+    next_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    document: Option<ReviewDocument>,
+    #[serde(default)]
     reviews: Vec<Review>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip)]
+    migration_backup: Option<String>,
 }
 
 fn review_format_2() -> u32 {
@@ -1596,8 +1683,13 @@ fn review_format_2() -> u32 {
 
 fn empty_store() -> ReviewFile {
     ReviewFile {
-        format: 2,
+        format: 3,
+        revision: 0,
+        next_id: 1,
+        document: None,
         reviews: Vec::new(),
+        extra: serde_json::Map::new(),
+        migration_backup: None,
     }
 }
 
@@ -1611,6 +1703,75 @@ fn validate_review(review: &Review) -> Result<(), String> {
     }
     if review.comment.len() > 2_000 {
         return Err("comment is too long (max 2 000 chars)".into());
+    }
+    if review.resolution.len() > 4_000 {
+        return Err("resolution is too long (max 4 000 chars)".into());
+    }
+    if let Some(anchor) = review.anchor.as_ref() {
+        for (name, value) in [("prefix", &anchor.prefix), ("suffix", &anchor.suffix)] {
+            if value.as_ref().is_some_and(|value| value.len() > 2_000) {
+                return Err(format!("anchor {name} is too long (max 2 000 chars)"));
+            }
+        }
+        if anchor
+            .document_revision
+            .as_ref()
+            .is_some_and(|value| value.len() > 256)
+        {
+            return Err("anchor documentRevision is too long".into());
+        }
+        if let Some(position) = anchor.position.as_ref() {
+            if position
+                .x
+                .is_some_and(|value| !value.is_finite() || value < 0.0)
+                || position
+                    .y
+                    .is_some_and(|value| !value.is_finite() || value < 0.0)
+                || position.page.is_some_and(|value| value == 0)
+            {
+                return Err(
+                    "anchor position must use nonnegative PDF points and a positive page".into(),
+                );
+            }
+        }
+    }
+    if serde_json::to_vec(review)
+        .map_err(|error| error.to_string())?
+        .len()
+        > 64_000
+    {
+        return Err("review record is too large (max 64 000 bytes)".into());
+    }
+    if !matches!(review.action.as_str(), "improve" | "delete") {
+        return Err("action must be improve or delete".into());
+    }
+    if !matches!(review.status.as_str(), "open" | "applied" | "resolved") {
+        return Err("status must be open, applied, or resolved".into());
+    }
+    if !(1..=16).contains(&review.color) {
+        return Err("color must be between 1 and 16".into());
+    }
+    for (label, value) in [("source", &review.source), ("build", &review.build)] {
+        if let Some(value) = value {
+            if serde_json::to_vec(value)
+                .map_err(|error| error.to_string())?
+                .len()
+                > 16_000
+            {
+                return Err(format!("{label} metadata is too large"));
+            }
+        }
+    }
+    if review.status == "applied"
+        && review.kind == "pdf"
+        && review
+            .build
+            .as_ref()
+            .and_then(|value| value.get("success"))
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return Err("PDF review cannot be marked applied without a successful build".into());
     }
     if !review_basename(&review.file) {
         return Err("file must be a basename".into());
@@ -1663,20 +1824,86 @@ fn drop_redundant_end(review: &mut Review) {
 }
 
 fn parse_store(text: &str) -> Result<ReviewFile, String> {
+    if text.len() > 4_000_000 {
+        return Err("review sidecar is too large (max 4 MB)".into());
+    }
     let trimmed = text.trim_start_matches('\u{feff}').trim();
     if trimmed.is_empty() {
-        return Ok(empty_store());
+        return Err("review sidecar is empty or incomplete".into());
     }
-    let parsed: ReviewFile = serde_json::from_str(trimmed)
+    let raw: serde_json::Value = serde_json::from_str(trimmed)
         .or_else(|_| serde_json::from_str(&strip_trailing_commas(trimmed)))
         .map_err(|error| error.to_string())?;
-    if parsed.format != 1 && parsed.format != 2 {
+    let mut parsed: ReviewFile =
+        serde_json::from_value(raw.clone()).map_err(|error| error.to_string())?;
+    if !matches!(parsed.format, 1..=3) {
         return Err("unsupported review format".into());
     }
-    let mut parsed = parsed;
-    ensure_ids(&mut parsed.reviews)?;
-    parsed.format = 2;
+    let original_format = parsed.format;
+    if original_format == 3 {
+        validate_store_ids(&parsed)?;
+        let max_next = parsed
+            .reviews
+            .iter()
+            .filter_map(|review| review.id.strip_prefix('r')?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("review id limit reached")?;
+        if parsed.next_id == 0 {
+            parsed.next_id = max_next;
+        }
+        if parsed.next_id < max_next {
+            return Err("nextId must be greater than every existing review ID".into());
+        }
+        for review in &parsed.reviews {
+            validate_review(review)?;
+        }
+    } else {
+        ensure_ids(&mut parsed.reviews)?;
+        for (index, review) in parsed.reviews.iter_mut().enumerate() {
+            let color_was_stored = raw
+                .get("reviews")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|reviews| reviews.get(index))
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|record| record.contains_key("color"));
+            if !color_was_stored {
+                review.color = legacy_review_color(&review.id);
+            }
+        }
+        parsed.next_id = parsed
+            .reviews
+            .iter()
+            .filter_map(|review| review.id.strip_prefix('r')?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("review id limit reached")?;
+        parsed.migration_backup = Some(text.to_string());
+    }
+    parsed.format = 3;
     Ok(parsed)
+}
+
+fn legacy_review_color(id: &str) -> u8 {
+    id.strip_prefix('r')
+        .and_then(|number| number.parse::<u64>().ok())
+        .map(|number| ((number.saturating_sub(1) % 6) + 1) as u8)
+        .unwrap_or(1)
+}
+
+fn validate_store_ids(store: &ReviewFile) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for review in &store.reviews {
+        if review.id.is_empty() {
+            return Err("format 3 review is missing an id".into());
+        }
+        if !seen.insert(&review.id) {
+            return Err(format!("duplicate review id: {}", review.id));
+        }
+    }
+    Ok(())
 }
 
 /// Agents often leave a trailing comma. serde_json will not.
@@ -1740,7 +1967,7 @@ fn ensure_ids(reviews: &mut [Review]) -> Result<(), String> {
             review
                 .id
                 .strip_prefix('r')
-                .and_then(|rest| rest.parse::<u32>().ok())
+                .and_then(|rest| rest.parse::<u64>().ok())
         })
         .max()
         .unwrap_or(0);
@@ -1756,23 +1983,144 @@ fn ensure_ids(reviews: &mut [Review]) -> Result<(), String> {
     Ok(())
 }
 
-fn next_review_id(reviews: &[Review]) -> Result<String, String> {
-    let max = reviews
-        .iter()
-        .filter_map(|review| {
-            review
-                .id
-                .strip_prefix('r')
-                .and_then(|rest| rest.parse::<u32>().ok())
-        })
-        .max()
-        .unwrap_or(0);
-    let next = max.checked_add(1).ok_or("review id limit reached")?;
-    Ok(format!("r{next}"))
+fn next_review_id(store: &ReviewFile) -> Result<String, String> {
+    if store.next_id == 0 {
+        return Err("review id limit reached".into());
+    }
+    Ok(format!("r{}", store.next_id))
 }
 
-fn save_store(sidecar: &Path, store: &ReviewFile) -> Result<(), String> {
+fn review_ranges_overlap(first: &Review, second: &Review) -> bool {
+    if first.kind != second.kind {
+        return false;
+    }
+    let range = |review: &Review| {
+        let start = if review.kind == "pdf" {
+            review.at.page
+        } else {
+            review.at.line
+        }?;
+        Some((start, review.at.end.unwrap_or(start).max(start)))
+    };
+    let (Some((first_start, first_end)), Some((second_start, second_end))) =
+        (range(first), range(second))
+    else {
+        return false;
+    };
+    first_start <= second_end && second_start <= first_end
+}
+
+fn choose_review_color(store: &ReviewFile, review: &Review) -> u8 {
+    let mut counts = [0usize; 17];
+    for existing in &store.reviews {
+        if matches!(existing.status.as_str(), "open" | "applied")
+            && review_ranges_overlap(existing, review)
+            && (1..=16).contains(&existing.color)
+        {
+            counts[usize::from(existing.color)] += 1;
+        }
+    }
+    let seed = store.next_id.saturating_sub(1) as usize % 16;
+    for offset in 0..16 {
+        let color = (seed + offset) % 16 + 1;
+        if counts[color] == 0 {
+            return color as u8;
+        }
+    }
+    let least_used = *counts[1..].iter().min().unwrap_or(&0);
+    for offset in 0..16 {
+        let color = (seed + offset) % 16 + 1;
+        if counts[color] == least_used {
+            return color as u8;
+        }
+    }
+    1
+}
+
+fn document_sha256(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+struct ReviewLock(std::fs::File);
+
+impl ReviewLock {
+    fn acquire(sidecar: &Path) -> Result<Self, String> {
+        let lock_path = sidecar.with_extension(format!(
+            "{}.lock",
+            sidecar
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("json")
+        ));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .map_err(|error| error.to_string())?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self(file)),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err("timed out waiting for review transaction lock".into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.to_string()),
+            }
+        }
+    }
+}
+
+impl Drop for ReviewLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn save_store(sidecar: &Path, store: &mut ReviewFile) -> Result<(), String> {
     use std::io::Write;
+    store.format = 3;
+    let minimum_next_id = store
+        .reviews
+        .iter()
+        .filter_map(|review| review.id.strip_prefix('r')?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or("review id limit reached")?;
+    store.next_id = store.next_id.max(minimum_next_id);
+    store.revision = store
+        .revision
+        .checked_add(1)
+        .ok_or("review revision limit reached")?;
+    validate_store_ids(store)?;
+    for review in &store.reviews {
+        validate_review(review)?;
+    }
+    let prior_valid = if sidecar.exists() {
+        let previous = std::fs::read_to_string(sidecar).map_err(|error| error.to_string())?;
+        parse_store(&previous)?;
+        Some(previous.into_bytes())
+    } else {
+        None
+    };
     let json = serde_json::to_string_pretty(store).map_err(|error| error.to_string())?;
     let mut temp = tempfile::NamedTempFile::new_in(sidecar.parent().unwrap_or(Path::new(".")))
         .map_err(|error| error.to_string())?;
@@ -1785,10 +2133,66 @@ fn save_store(sidecar: &Path, store: &ReviewFile) -> Result<(), String> {
     temp.as_file()
         .sync_all()
         .map_err(|error| error.to_string())?;
-    // std::fs::rename can replace an open destination on modern Windows.
+    if let Some(previous) = prior_valid.as_deref() {
+        write_atomic_bytes(&sidecar.with_extension("json.bak"), previous)?;
+    }
+    if let Some(original) = store.migration_backup.as_deref() {
+        let backup = sidecar.with_extension("json.pre-v3.bak");
+        if !backup.exists() {
+            write_atomic_bytes(&backup, original.as_bytes())?;
+        }
+    }
+    // Windows readers can briefly block an atomic replacement.
     let temp = temp.into_temp_path();
-    std::fs::rename(&temp, sidecar).map_err(|error| error.to_string())?;
+    atomic_replace(&temp, sidecar)?;
+    store.migration_backup = None;
     Ok(())
+}
+
+fn write_atomic_bytes(destination: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let parent = destination.parent().unwrap_or(Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    if let Ok(metadata) = std::fs::metadata(destination) {
+        temp.as_file()
+            .set_permissions(metadata.permissions())
+            .map_err(|error| error.to_string())?;
+    }
+    temp.write_all(bytes).map_err(|error| error.to_string())?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    let temp = temp.into_temp_path();
+    atomic_replace(&temp, destination)
+}
+
+fn atomic_replace(source: &Path, destination: &Path) -> Result<(), String> {
+    rename_with_retry(
+        || std::fs::rename(source, destination),
+        |error| cfg!(windows) && is_windows_replace_contention(error),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn is_windows_replace_contention(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+fn rename_with_retry(
+    mut rename: impl FnMut() -> std::io::Result<()>,
+    retryable: impl Fn(&std::io::Error) -> bool,
+) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match rename() {
+            Ok(()) => return Ok(()),
+            Err(error) if retryable(&error) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn review_fingerprint(review: &Review) -> String {
@@ -1820,8 +2224,13 @@ fn load_store(doc_path: &Path) -> Result<(PathBuf, ReviewFile), String> {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("");
-        let old =
-            parse_store(&std::fs::read_to_string(&legacy).map_err(|error| error.to_string())?)?;
+        let raw = std::fs::read_to_string(&legacy).map_err(|error| error.to_string())?;
+        let old = parse_store(&raw)?;
+        let old_format =
+            serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}'))
+                .ok()
+                .and_then(|value| value.get("format").and_then(serde_json::Value::as_u64))
+                .unwrap_or(2);
         let have: HashSet<String> = store.reviews.iter().map(review_fingerprint).collect();
         for review in old.reviews {
             if review.file == basename && !have.contains(&review_fingerprint(&review)) {
@@ -1829,18 +2238,50 @@ fn load_store(doc_path: &Path) -> Result<(PathBuf, ReviewFile), String> {
             }
         }
         ensure_ids(&mut store.reviews)?;
+        store.next_id = store
+            .reviews
+            .iter()
+            .filter_map(|review| review.id.strip_prefix('r')?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("review id limit reached")?;
+        if old_format < 3 && store.migration_backup.is_none() {
+            store.migration_backup = Some(raw);
+        }
+    }
+    if kind_for(doc_path) == "pdf" {
+        let basename = document_basename(doc_path)?;
+        let tex_name = doc_path.with_extension("tex");
+        let metadata = store.document.get_or_insert_with(ReviewDocument::default);
+        metadata
+            .task
+            .get_or_insert_with(|| "pdf-review-latex-edit".into());
+        metadata.pdf = Some(basename);
+        metadata.project.get_or_insert_with(|| ".".into());
+        if metadata.tex.is_none() && tex_name.is_file() {
+            metadata.tex = tex_name
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string);
+        }
     }
     Ok((sidecar, store))
 }
 
 fn reviews_for_file(store: ReviewFile, basename: &str) -> ReviewFile {
     ReviewFile {
-        format: 2,
+        format: store.format,
+        revision: store.revision,
+        next_id: store.next_id,
+        document: store.document,
         reviews: store
             .reviews
             .into_iter()
             .filter(|review| review.file.is_empty() || review.file == basename)
             .collect(),
+        extra: store.extra,
+        migration_backup: None,
     }
 }
 
@@ -1889,18 +2330,37 @@ fn write_review(
         return Err("review file does not match the document".into());
     }
 
+    let sidecar_path = review_sidecar(&doc_path);
+    let _lock = ReviewLock::acquire(&sidecar_path)?;
+    if review.kind == "pdf"
+        && review
+            .anchor
+            .as_ref()
+            .is_none_or(|anchor| anchor.document_revision.is_none())
+    {
+        let digest = document_sha256(&doc_path)?;
+        review
+            .anchor
+            .get_or_insert_with(ReviewAnchor::default)
+            .document_revision = Some(digest);
+    }
     let (sidecar, mut store) = load_store(&doc_path)?;
     drop_redundant_end(&mut review);
-    review.id = next_review_id(&store.reviews)?;
+    review.id = next_review_id(&store)?;
+    review.color = choose_review_color(&store, &review);
+    store.next_id = store
+        .next_id
+        .checked_add(1)
+        .ok_or("review id limit reached")?;
     store.reviews.push(review);
-    store.format = 2;
-    save_store(&sidecar, &store)?;
+    save_store(&sidecar, &mut store)?;
     Ok(reviews_for_file(store, &basename))
 }
 
 fn list_reviews(document: &str, allowed: &HashSet<PathBuf>) -> Result<ReviewFile, String> {
     let doc_path = open_review_document(document, allowed)?;
     let basename = document_basename(&doc_path)?;
+    let _lock = ReviewLock::acquire(&review_sidecar(&doc_path))?;
     let (_sidecar, store) = load_store(&doc_path)?;
     Ok(reviews_for_file(store, &basename))
 }
@@ -1908,6 +2368,7 @@ fn list_reviews(document: &str, allowed: &HashSet<PathBuf>) -> Result<ReviewFile
 fn change_review_comment(
     document: &str,
     id: &str,
+    expected_comment: &str,
     comment: &str,
     allowed: &HashSet<PathBuf>,
 ) -> Result<ReviewFile, String> {
@@ -1919,6 +2380,7 @@ fn change_review_comment(
     }
     let doc_path = open_review_document(document, allowed)?;
     let basename = document_basename(&doc_path)?;
+    let _lock = ReviewLock::acquire(&review_sidecar(&doc_path))?;
     let (sidecar, mut store) = load_store(&doc_path)?;
     let Some(review) = store
         .reviews
@@ -1927,12 +2389,15 @@ fn change_review_comment(
     else {
         return Err("review not found".into());
     };
+    if review.comment != expected_comment {
+        return Err("review conflict: comment changed on disk".into());
+    }
     review.comment = comment.trim().to_string();
-    store.format = 2;
-    save_store(&sidecar, &store)?;
+    save_store(&sidecar, &mut store)?;
     Ok(reviews_for_file(store, &basename))
 }
 
+#[cfg(test)]
 fn remove_review(
     document: &str,
     id: &str,
@@ -1943,6 +2408,7 @@ fn remove_review(
     }
     let doc_path = open_review_document(document, allowed)?;
     let basename = document_basename(&doc_path)?;
+    let _lock = ReviewLock::acquire(&review_sidecar(&doc_path))?;
     let (sidecar, mut store) = load_store(&doc_path)?;
     let before = store.reviews.len();
     store
@@ -1951,8 +2417,123 @@ fn remove_review(
     if store.reviews.len() == before {
         return Err("review not found".into());
     }
-    store.format = 2;
-    save_store(&sidecar, &store)?;
+    save_store(&sidecar, &mut store)?;
+    Ok(reviews_for_file(store, &basename))
+}
+
+fn remove_review_cas(
+    document: &str,
+    id: &str,
+    expected_review: &serde_json::Value,
+    allowed: &HashSet<PathBuf>,
+) -> Result<ReviewFile, String> {
+    if id.is_empty() {
+        return Err("review id is missing".into());
+    }
+    let doc_path = open_review_document(document, allowed)?;
+    let basename = document_basename(&doc_path)?;
+    let sidecar_path = review_sidecar(&doc_path);
+    let _lock = ReviewLock::acquire(&sidecar_path)?;
+    let (sidecar, mut store) = load_store(&doc_path)?;
+    let index = store
+        .reviews
+        .iter()
+        .position(|review| review.id == id && review.file == basename)
+        .ok_or_else(|| "review not found".to_string())?;
+    let current = serde_json::to_value(&store.reviews[index]).map_err(|error| error.to_string())?;
+    if current != *expected_review {
+        return Err("review conflict: record changed on disk".into());
+    }
+    store.reviews.remove(index);
+    save_store(&sidecar, &mut store)?;
+    Ok(reviews_for_file(store, &basename))
+}
+
+fn patch_review_record(
+    document: &str,
+    id: &str,
+    patch: &serde_json::Value,
+    expected: &serde_json::Value,
+    allowed: &HashSet<PathBuf>,
+    dry_run: bool,
+) -> Result<ReviewFile, String> {
+    const PATCHABLE: &[&str] = &[
+        "action",
+        "status",
+        "resolution",
+        "source",
+        "build",
+        "color",
+        "anchor",
+    ];
+    let changes = patch
+        .as_object()
+        .ok_or_else(|| "patch must be a JSON object".to_string())?;
+    let expected = expected
+        .as_object()
+        .ok_or_else(|| "expected must be a JSON object".to_string())?;
+    if changes.is_empty() {
+        return Err("patch must contain at least one field".into());
+    }
+    for key in changes.keys() {
+        if !PATCHABLE.contains(&key.as_str()) {
+            return Err(format!("unsupported review patch field: {key}"));
+        }
+        if !expected.contains_key(key) && !expected.contains_key("$revision") {
+            return Err(format!(
+                "expected value is required for patched field: {key}"
+            ));
+        }
+    }
+    let doc_path = open_review_document(document, allowed)?;
+    let basename = document_basename(&doc_path)?;
+    let sidecar_path = review_sidecar(&doc_path);
+    let _lock = ReviewLock::acquire(&sidecar_path)?;
+    let (sidecar, mut store) = load_store(&doc_path)?;
+    if let Some(revision) = expected.get("$revision") {
+        let revision = revision
+            .as_u64()
+            .ok_or_else(|| "expected $revision must be an unsigned integer".to_string())?;
+        if revision != store.revision {
+            return Err(format!(
+                "review conflict: revision changed (expected {revision}, found {})",
+                store.revision
+            ));
+        }
+    }
+    let review = store
+        .reviews
+        .iter_mut()
+        .find(|review| review.id == id && review.file == basename)
+        .ok_or_else(|| "review not found".to_string())?;
+    let mut current = serde_json::to_value(&*review)
+        .map_err(|error| error.to_string())?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "could not serialize review".to_string())?;
+    for (key, value) in changes {
+        let actual = current.get(key).cloned().unwrap_or(serde_json::Value::Null);
+        if expected
+            .get(key)
+            .is_some_and(|expected_value| expected_value != &actual)
+        {
+            return Err(format!("review conflict: {key} changed on disk"));
+        }
+        current.insert(key.clone(), value.clone());
+    }
+    let patched: Review = serde_json::from_value(serde_json::Value::Object(current))
+        .map_err(|error| format!("invalid review patch: {error}"))?;
+    validate_review(&patched)?;
+    let index = store
+        .reviews
+        .iter()
+        .position(|record| record.id == id)
+        .unwrap();
+    store.reviews[index] = patched;
+    if dry_run {
+        return Ok(reviews_for_file(store, &basename));
+    }
+    save_store(&sidecar, &mut store)?;
     Ok(reviews_for_file(store, &basename))
 }
 
@@ -1982,10 +2563,52 @@ fn read_reviews(document: String, watched: State<'_, Watched>) -> Result<ReviewF
 fn update_review(
     document: String,
     id: String,
+    expected_comment: String,
     comment: String,
     watched: State<'_, Watched>,
 ) -> Result<ReviewFile, String> {
-    let store = change_review_comment(&document, &id, &comment, &allowed_set(&watched)?)?;
+    let store = change_review_comment(
+        &document,
+        &id,
+        &expected_comment,
+        &comment,
+        &allowed_set(&watched)?,
+    )?;
+    note_sidecar_written(&watched, &document);
+    Ok(store)
+}
+
+#[tauri::command]
+async fn review_source_hint(
+    document: String,
+    position: serde_json::Value,
+    watched: State<'_, Watched>,
+) -> Result<Option<serde_json::Value>, String> {
+    let path = open_review_document(&document, &allowed_set(&watched)?)?;
+    if kind_for(&path) != "pdf" {
+        return Ok(None);
+    }
+    tauri::async_runtime::spawn_blocking(move || review_source::hint(&path, &position))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn patch_review(
+    document: String,
+    id: String,
+    patch: serde_json::Value,
+    expected: serde_json::Value,
+    watched: State<'_, Watched>,
+) -> Result<ReviewFile, String> {
+    let store = patch_review_record(
+        &document,
+        &id,
+        &patch,
+        &expected,
+        &allowed_set(&watched)?,
+        false,
+    )?;
     note_sidecar_written(&watched, &document);
     Ok(store)
 }
@@ -1994,9 +2617,10 @@ fn update_review(
 fn delete_review(
     document: String,
     id: String,
+    expected_record: serde_json::Value,
     watched: State<'_, Watched>,
 ) -> Result<ReviewFile, String> {
-    let store = remove_review(&document, &id, &allowed_set(&watched)?)?;
+    let store = remove_review_cas(&document, &id, &expected_record, &allowed_set(&watched)?)?;
     note_sidecar_written(&watched, &document);
     Ok(store)
 }
@@ -2204,6 +2828,10 @@ files   .pdf  .png .jpg .jpeg .webp .avif .gif .bmp  .md .markdown
         this command returns at once. A file that is already a tab is aimed at
         that page rather than opened twice. Each file opened is printed on
         stdout, with the fragment that was understood.
+
+reviews
+  pdf-next reviews list <PDF>         print review tasks as JSON without a window
+  pdf-next reviews update --help      safe agent updates and examples
 
 flags
   --left, --right, --top, --bottom   dock to that half of the screen
@@ -2532,6 +3160,9 @@ fn main() {
     // The command line is answered before any window exists, so `--help`,
     // `--version` and a mistyped path cost nothing and block nothing.
     let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(status) = review_command::maybe_run(arguments.iter().cloned()) {
+        std::process::exit(status);
+    }
     let cwd = std::env::current_dir().ok();
     let invocation = match parse_cli(arguments.iter().cloned(), cwd.as_deref()) {
         Ok(Cli::Help) => {
@@ -2644,6 +3275,8 @@ fn main() {
             read_reviews,
             update_review,
             delete_review,
+            patch_review,
+            review_source_hint,
             reduce_pdf
         ])
         .setup(move |app| {
@@ -2717,11 +3350,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{adopt, empty_store, review_sidecar, save_store, Watched, LEGACY_REVIEW_FILE};
     use super::{
-        change_review_comment, document_watch_due, list_reviews, natural_key, open_download,
-        open_link, parse_cli, parse_store, reduced_pdf_path, remove_review, render_markdown,
-        shrink_pdf_bytes, sidecar_ready, write_review, Cli, Review, ReviewAt, Target,
+        adopt, empty_store, review_sidecar, save_store, ReviewDocument, Watched, LEGACY_REVIEW_FILE,
+    };
+    use super::{
+        change_review_comment, document_watch_due, is_windows_replace_contention, list_reviews,
+        natural_key, next_review_id, open_download, open_link, parse_cli, parse_store,
+        patch_review_record, reduced_pdf_path, remove_review, remove_review_cas, rename_with_retry,
+        render_markdown, shrink_pdf_bytes, sidecar_ready, write_review, Cli, Review, ReviewAt,
+        Target,
     };
     use std::collections::HashSet;
     use std::ffi::OsString;
@@ -3166,9 +3803,18 @@ mod tests {
                 line: Some(12),
                 end: Some(18),
                 page: None,
+                extra: serde_json::Map::new(),
             },
             quote: "the selected passage".into(),
             comment: "tighten this".into(),
+            action: "improve".into(),
+            status: "open".into(),
+            resolution: String::new(),
+            color: 1,
+            anchor: None,
+            source: None,
+            build: None,
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -3181,9 +3827,18 @@ mod tests {
                 page: Some(7),
                 line: None,
                 end: None,
+                extra: serde_json::Map::new(),
             },
             quote: "the selected passage".into(),
             comment: "does the figure still match?".into(),
+            action: "improve".into(),
+            status: "open".into(),
+            resolution: String::new(),
+            color: 1,
+            anchor: None,
+            source: None,
+            build: None,
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -3273,8 +3928,8 @@ mod tests {
         let pdf_store: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("paper_review.json")).unwrap())
                 .unwrap();
-        assert_eq!(md_store["format"], 2);
-        assert_eq!(pdf_store["format"], 2);
+        assert_eq!(md_store["format"], 3);
+        assert_eq!(pdf_store["format"], 3);
         let md_keys: HashSet<_> = md_store["reviews"][0]
             .as_object()
             .unwrap()
@@ -3287,14 +3942,19 @@ mod tests {
             .keys()
             .cloned()
             .collect();
-        assert_eq!(md_keys, pdf_keys);
+        assert!(md_keys.is_subset(&pdf_keys));
         for key in ["id", "file", "kind", "at", "quote", "comment"] {
             assert!(md_keys.contains(key), "missing {key}");
+            assert!(pdf_keys.contains(key), "missing PDF {key}");
         }
         assert_eq!(md_store["reviews"][0]["id"], "r1");
         assert_eq!(md_store["reviews"][0]["kind"], "markdown");
         assert_eq!(pdf_store["reviews"][0]["kind"], "pdf");
         assert_eq!(pdf_store["reviews"][0]["at"]["page"], 7);
+        assert!(pdf_store["reviews"][0]["anchor"]["documentRevision"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3356,7 +4016,8 @@ mod tests {
         let stored = write_review(&path, second, &allowed).unwrap();
         assert_eq!(stored.reviews.len(), 2);
 
-        let updated = change_review_comment(&path, "r1", "edited", &allowed).unwrap();
+        let updated =
+            change_review_comment(&path, "r1", "tighten this", "edited", &allowed).unwrap();
         assert_eq!(updated.reviews.len(), 2);
         let first = updated
             .reviews
@@ -3380,13 +4041,22 @@ mod tests {
         let pdf = dir.join("paper.pdf");
         std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
         let mut legacy = empty_store();
-        legacy.reviews.push(pdf_review());
-        save_store(&dir.join(LEGACY_REVIEW_FILE), &legacy).unwrap();
+        let mut review = pdf_review();
+        review.id = "r1".into();
+        legacy.reviews.push(review);
+        save_store(&dir.join(LEGACY_REVIEW_FILE), &mut legacy).unwrap();
         let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
         let document = pdf.to_str().unwrap();
         let listed = list_reviews(document, &allowed).unwrap();
         let id = listed.reviews[0].id.clone();
-        change_review_comment(document, &id, "updated", &allowed).unwrap();
+        change_review_comment(
+            document,
+            &id,
+            "does the figure still match?",
+            "updated",
+            &allowed,
+        )
+        .unwrap();
         let updated = list_reviews(document, &allowed).unwrap();
         assert_eq!(
             updated.reviews.len(),
@@ -3428,10 +4098,11 @@ mod tests {
         foreign.file = "other.pdf".into();
         let mut store = empty_store();
         store.reviews.push(foreign.clone());
-        save_store(&review_sidecar(&pdf), &store).unwrap();
+        store.next_id = 2;
+        save_store(&review_sidecar(&pdf), &mut store).unwrap();
         let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
         let document = pdf.to_str().unwrap();
-        assert!(change_review_comment(document, "r1", "changed", &allowed).is_err());
+        assert!(change_review_comment(document, "r1", "", "changed", &allowed).is_err());
         assert!(remove_review(document, "r1", &allowed).is_err());
         let saved = parse_store(&std::fs::read_to_string(review_sidecar(&pdf)).unwrap()).unwrap();
         assert_eq!(saved.reviews, vec![foreign]);
@@ -3447,8 +4118,11 @@ mod tests {
         std::fs::write(&sidecar, old).unwrap();
         let mut snapshot = std::fs::File::open(&sidecar).unwrap();
         let mut store = empty_store();
-        store.reviews.push(pdf_review());
-        save_store(&sidecar, &store).unwrap();
+        let mut review = pdf_review();
+        review.id = "r1".into();
+        store.reviews.push(review);
+        store.next_id = 2;
+        save_store(&sidecar, &mut store).unwrap();
         let mut bytes = Vec::new();
         snapshot.read_to_end(&mut bytes).unwrap();
         assert_eq!(
@@ -3468,7 +4142,7 @@ mod tests {
 
     #[test]
     fn oversized_review_ids_return_an_error_instead_of_panicking() {
-        assert!(parse_store(r#"{"reviews":[{"id":"r4294967295"},{}]}"#).is_err());
+        assert!(parse_store(r#"{"reviews":[{"id":"r18446744073709551615"},{}]}"#).is_err());
     }
 
     #[test]
@@ -3502,6 +4176,8 @@ mod tests {
         let left = remove_review(&path, "r1", &allowed).unwrap();
         assert_eq!(left.reviews.len(), 1);
         assert_eq!(left.reviews[0].id, "r2");
+        let added = write_review(&path, markdown_review(), &allowed).unwrap();
+        assert_eq!(added.reviews.last().unwrap().id, "r3");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3533,10 +4209,451 @@ mod tests {
             "{\n  \"reviews\": [\n    {\n      \"id\": \"r1\",\n      \"quote\": \"three words here\",\n      \"at\": { \"page\": 1 },\n      \"comment\": \"fix\"\n    },\n  ]\n}\n",
         )
         .unwrap();
-        assert_eq!(store.format, 2);
+        assert_eq!(store.format, 3);
         assert_eq!(store.reviews.len(), 1);
         assert_eq!(store.reviews[0].id, "r1");
         assert_eq!(store.reviews[0].comment, "fix");
         assert_eq!(store.reviews[0].quote, "three words here");
+    }
+
+    #[test]
+    fn format_three_roundtrips_review_and_store_extensions() {
+        let raw = r#"{"format":3,"revision":8,"nextId":22,"storeExtra":{"ok":true},"document":{"pdf":"paper.pdf","project":".","tex":"paper.tex","extra":9},"reviews":[{"id":"r21","file":"paper.pdf","kind":"pdf","at":{"page":2,"atExtra":"kept"},"quote":"quote","comment":"note","action":"delete","status":"applied","resolution":"removed in tex","color":7,"anchor":{"prefix":"before","suffix":"after","documentRevision":"sha256:abc","position":{"page":2,"x":1.5,"y":3.0,"boxExtra":true},"anchorExtra":[1]},"source":{"path":"chapter.tex"},"build":{"success":true},"recordExtra":{"x":1}}]}"#;
+        let parsed = parse_store(raw).unwrap();
+        let encoded = serde_json::to_value(parsed).unwrap();
+        assert_eq!(encoded["format"], 3);
+        assert_eq!(encoded["revision"], 8);
+        assert_eq!(encoded["nextId"], 22);
+        assert_eq!(encoded["storeExtra"]["ok"], true);
+        assert_eq!(encoded["document"]["extra"], 9);
+        assert_eq!(encoded["reviews"][0]["action"], "delete");
+        assert_eq!(encoded["reviews"][0]["recordExtra"]["x"], 1);
+        assert_eq!(encoded["reviews"][0]["at"]["atExtra"], "kept");
+        assert_eq!(encoded["reviews"][0]["anchor"]["anchorExtra"][0], 1);
+        assert_eq!(
+            encoded["reviews"][0]["anchor"]["position"]["boxExtra"],
+            true
+        );
+    }
+
+    #[test]
+    fn format_three_rejects_duplicate_or_missing_ids() {
+        let duplicate = r#"{"format":3,"reviews":[{"id":"r1"},{"id":"r1"}]}"#;
+        let missing = r#"{"format":3,"reviews":[{}]}"#;
+        assert!(parse_store(duplicate).is_err());
+        assert!(parse_store(missing).is_err());
+    }
+
+    #[test]
+    fn empty_review_sidecar_is_not_an_empty_store() {
+        assert!(parse_store("").is_err());
+        assert!(parse_store(" \n\t").is_err());
+        assert!(parse_store(r#"{"format":3,"reviews":[]}"#).is_ok());
+    }
+
+    #[test]
+    fn empty_sidecar_is_never_overwritten_as_a_clear_store() {
+        let dir = scratch("empty_review_sidecar");
+        let md = dir.join("collab.md");
+        std::fs::write(&md, "# hi\n").unwrap();
+        let sidecar = review_sidecar(&md);
+        std::fs::write(&sidecar, "\n\t").unwrap();
+        let before = std::fs::read(&sidecar).unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&md).unwrap()]);
+        assert!(write_review(md.to_str().unwrap(), markdown_review(), &allowed).is_err());
+        assert_eq!(std::fs::read(&sidecar).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn remove_review_cas_protects_a_changed_record() {
+        let dir = scratch("review_remove_cas");
+        let md = dir.join("collab.md");
+        std::fs::write(&md, "# hi\n").unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&md).unwrap()]);
+        let path = md.to_str().unwrap();
+        let initial = write_review(path, markdown_review(), &allowed).unwrap();
+        change_review_comment(path, "r1", "tighten this", "newer comment", &allowed).unwrap();
+        let expected = serde_json::to_value(&initial.reviews[0]).unwrap();
+        let error = remove_review_cas(path, "r1", &expected, &allowed).unwrap_err();
+        assert!(error.starts_with("review conflict:"), "{error}");
+        assert_eq!(list_reviews(path, &allowed).unwrap().reviews.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deleted_review_ids_are_not_reused() {
+        let mut store = empty_store();
+        let mut first = pdf_review();
+        first.id = "r1".into();
+        let mut second = pdf_review();
+        second.id = "r2".into();
+        store.reviews.extend([first, second]);
+        store.next_id = 3;
+        store.reviews.remove(1);
+        assert_eq!(next_review_id(&store).unwrap(), "r3");
+    }
+
+    #[test]
+    fn legacy_format_migrates_losslessly_and_backs_up_on_first_write() {
+        let dir = scratch("review_migration_backup");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let sidecar = review_sidecar(&pdf);
+        let original = r#"{"format":2,"reviews":[{"id":"r8","file":"paper.pdf","kind":"pdf","at":{"page":3,"oldAt":true},"quote":"keep me","comment":"note","oldField":{"v":1}}],"oldStore":42}"#;
+        std::fs::write(&sidecar, original).unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let path = pdf.to_str().unwrap();
+        let listed = list_reviews(path, &allowed).unwrap();
+        assert_eq!(listed.reviews[0].action, "improve");
+        assert_eq!(listed.reviews[0].status, "open");
+        assert_eq!(
+            serde_json::to_value(&listed.reviews[0]).unwrap()["oldField"]["v"],
+            1
+        );
+        assert!(!sidecar.with_extension("json.pre-v3.bak").exists());
+        change_review_comment(path, "r8", "note", "updated", &allowed).unwrap();
+        assert_eq!(
+            std::fs::read(sidecar.with_extension("json.pre-v3.bak")).unwrap(),
+            original.as_bytes()
+        );
+        let migrated = parse_store(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert_eq!(migrated.format, 3);
+        assert_eq!(migrated.reviews[0].extra["oldField"]["v"], 1);
+        assert_eq!(migrated.extra["oldStore"], 42);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn comment_cas_rejects_stale_text_and_keeps_the_new_value() {
+        let dir = scratch("review_comment_cas");
+        let md = dir.join("collab.md");
+        std::fs::write(&md, "# hi\n").unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&md).unwrap()]);
+        let path = md.to_str().unwrap();
+        write_review(path, markdown_review(), &allowed).unwrap();
+        patch_review_record(
+            path,
+            "r1",
+            &serde_json::json!({"resolution":"source updated"}),
+            &serde_json::json!({"resolution":""}),
+            &allowed,
+            false,
+        )
+        .unwrap();
+        change_review_comment(path, "r1", "tighten this", "agent edit", &allowed).unwrap();
+        let error =
+            change_review_comment(path, "r1", "tighten this", "stale draft", &allowed).unwrap_err();
+        assert!(error.starts_with("review conflict:"), "{error}");
+        assert_eq!(
+            list_reviews(path, &allowed).unwrap().reviews[0].comment,
+            "agent edit"
+        );
+        assert_eq!(
+            list_reviews(path, &allowed).unwrap().reviews[0].resolution,
+            "source updated"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn patch_review_merges_independent_fields_and_rejects_stale_field() {
+        let dir = scratch("review_patch_cas");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let path = pdf.to_str().unwrap();
+        let initial = write_review(path, pdf_review(), &allowed).unwrap();
+        assert_eq!(
+            serde_json::to_value(&initial.reviews[0]).unwrap()["resolution"],
+            ""
+        );
+        let changed = patch_review_record(
+            path,
+            "r1",
+            &serde_json::json!({"resolution":"removed in chapter.tex"}),
+            &serde_json::json!({"resolution":""}),
+            &allowed,
+            false,
+        )
+        .unwrap();
+        assert_eq!(changed.reviews[0].comment, initial.reviews[0].comment);
+        assert_eq!(changed.reviews[0].resolution, "removed in chapter.tex");
+        let stale = patch_review_record(
+            path,
+            "r1",
+            &serde_json::json!({"resolution":"stale"}),
+            &serde_json::json!({"resolution":null}),
+            &allowed,
+            false,
+        )
+        .unwrap_err();
+        assert!(stale.starts_with("review conflict:"), "{stale}");
+        let build_required = patch_review_record(
+            path,
+            "r1",
+            &serde_json::json!({"status":"applied"}),
+            &serde_json::json!({"status":"open"}),
+            &allowed,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            build_required.contains("successful build"),
+            "{build_required}"
+        );
+        let applied = patch_review_record(
+            path,
+            "r1",
+            &serde_json::json!({"status":"applied","build":{"success":true,"command":"latexmk"}}),
+            &serde_json::json!({"status":"open","build":null}),
+            &allowed,
+            false,
+        )
+        .unwrap();
+        assert_eq!(applied.reviews[0].status, "applied");
+        assert_eq!(applied.reviews[0].build.as_ref().unwrap()["success"], true);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_appends_get_unique_monotonic_ids() {
+        let dir = scratch("review_concurrent_append");
+        let md = dir.join("collab.md");
+        std::fs::write(&md, "# hi\n").unwrap();
+        let path = md.to_str().unwrap().to_string();
+        let allowed = HashSet::from([std::fs::canonicalize(&md).unwrap()]);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let allowed = allowed.clone();
+                std::thread::spawn(move || {
+                    write_review(&path, markdown_review(), &allowed).unwrap()
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let listed = list_reviews(&path, &allowed).unwrap();
+        let ids: HashSet<_> = listed
+            .reviews
+            .iter()
+            .map(|review| review.id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 8);
+        let colors: HashSet<_> = listed.reviews.iter().map(|review| review.color).collect();
+        assert_eq!(colors.len(), 8);
+        assert_eq!(listed.next_id, 9);
+        assert_eq!(listed.revision, 8);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn thirty_same_page_reviews_keep_stable_ids_and_balance_sixteen_colors() {
+        let dir = scratch("review_many_colors");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let path = pdf.to_str().unwrap();
+        let mut previous_colors = Vec::new();
+        for count in 1..=30 {
+            let listed = write_review(path, pdf_review(), &allowed).unwrap();
+            assert_eq!(listed.reviews.len(), count);
+            let ids: HashSet<_> = listed
+                .reviews
+                .iter()
+                .map(|review| review.id.as_str())
+                .collect();
+            assert_eq!(ids.len(), count);
+            assert!(listed
+                .reviews
+                .iter()
+                .all(|review| (1..=16).contains(&review.color)));
+            if count == 16 {
+                previous_colors = listed.reviews.iter().map(|review| review.color).collect();
+            } else if count > 16 {
+                assert_eq!(
+                    listed.reviews[..16]
+                        .iter()
+                        .map(|review| review.color)
+                        .collect::<Vec<_>>(),
+                    previous_colors
+                );
+            }
+        }
+        let final_store = list_reviews(path, &allowed).unwrap();
+        let mut counts = [0; 17];
+        for review in &final_store.reviews {
+            counts[usize::from(review.color)] += 1;
+        }
+        assert!(counts[1..].iter().all(|count| (1..=2).contains(count)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pdf_review_metadata_uses_only_an_existing_matching_tex_entry() {
+        let dir = scratch("review_tex_metadata");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let missing = list_reviews(pdf.to_str().unwrap(), &allowed).unwrap();
+        assert_eq!(
+            missing.document.as_ref().unwrap().pdf.as_deref(),
+            Some("paper.pdf")
+        );
+        assert_eq!(missing.document.as_ref().unwrap().tex, None);
+        std::fs::write(dir.join("paper.tex"), "\\documentclass{article}").unwrap();
+        let found = list_reviews(pdf.to_str().unwrap(), &allowed).unwrap();
+        assert_eq!(
+            found.document.as_ref().unwrap().tex.as_deref(),
+            Some("paper.tex")
+        );
+        let sidecar = review_sidecar(&pdf);
+        let mut established = empty_store();
+        established.document = Some(ReviewDocument {
+            task: Some("preserved-task".into()),
+            pdf: Some("paper.pdf".into()),
+            project: Some("latex-project".into()),
+            tex: Some("chapters/main.tex".into()),
+            extra: serde_json::Map::new(),
+        });
+        save_store(&sidecar, &mut established).unwrap();
+        std::fs::remove_file(dir.join("paper.tex")).unwrap();
+        let retained = list_reviews(pdf.to_str().unwrap(), &allowed).unwrap();
+        assert_eq!(
+            retained.document.as_ref().unwrap().task.as_deref(),
+            Some("preserved-task")
+        );
+        assert_eq!(
+            retained.document.as_ref().unwrap().project.as_deref(),
+            Some("latex-project")
+        );
+        assert_eq!(
+            retained.document.as_ref().unwrap().tex.as_deref(),
+            Some("chapters/main.tex")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn save_store_keeps_an_atomic_last_valid_backup_and_rejects_bad_replacements() {
+        let dir = scratch("review_last_valid_backup");
+        let sidecar = dir.join("paper_review.json");
+        let original = b"{\"format\":3,\"revision\":1,\"nextId\":1,\"reviews\":[]}\n";
+        std::fs::write(&sidecar, original).unwrap();
+        let mut store = empty_store();
+        let mut review = pdf_review();
+        review.id = "r1".into();
+        store.reviews.push(review);
+        store.next_id = 2;
+        save_store(&sidecar, &mut store).unwrap();
+        let backup = sidecar.with_extension("json.bak");
+        assert_eq!(std::fs::read(&backup).unwrap(), original);
+
+        let current = std::fs::read(&sidecar).unwrap();
+        let previous_backup = std::fs::read(&backup).unwrap();
+        store.reviews[0].status = "unsupported".into();
+        assert!(save_store(&sidecar, &mut store).is_err());
+        assert_eq!(std::fs::read(&sidecar).unwrap(), current);
+        assert_eq!(std::fs::read(&backup).unwrap(), previous_backup);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn appended_pdf_captures_sha256_and_releases_its_file_handle() {
+        use sha2::{Digest, Sha256};
+
+        let dir = scratch("review_pdf_digest");
+        let pdf = dir.join("paper.pdf");
+        let bytes = b"%PDF-1.1\nsmall stable fixture\n%%EOF\n";
+        std::fs::write(&pdf, bytes).unwrap();
+        let expected = format!("sha256:{:x}", Sha256::digest(bytes));
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let stored = write_review(pdf.to_str().unwrap(), pdf_review(), &allowed).unwrap();
+        assert_eq!(
+            stored.reviews[0]
+                .anchor
+                .as_ref()
+                .unwrap()
+                .document_revision
+                .as_deref(),
+            Some(expected.as_str())
+        );
+        let renamed = dir.join("moved.pdf");
+        std::fs::rename(&pdf, &renamed).unwrap();
+        std::fs::remove_file(renamed).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_missing_colors_retain_the_six_color_id_cycle() {
+        let dir = scratch("review_legacy_colors");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let sidecar = review_sidecar(&pdf);
+        std::fs::write(
+            &sidecar,
+            r#"{"format":2,"reviews":[{"id":"r1","file":"paper.pdf","kind":"pdf","at":{"page":7},"quote":"one"},{"id":"r2","file":"paper.pdf","kind":"pdf","at":{"page":7},"quote":"two"},{"id":"r7","file":"paper.pdf","kind":"pdf","at":{"page":7},"quote":"seven"},{"id":"r4","file":"paper.pdf","kind":"pdf","at":{"page":7},"quote":"explicit","color":5}]}"#,
+        )
+        .unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let listed = list_reviews(pdf.to_str().unwrap(), &allowed).unwrap();
+        let colors: Vec<_> = listed.reviews.iter().map(|review| review.color).collect();
+        assert_eq!(colors, [1, 2, 1, 5]);
+        let updated = write_review(pdf.to_str().unwrap(), pdf_review(), &allowed).unwrap();
+        assert_eq!(
+            updated.reviews[..4]
+                .iter()
+                .map(|review| review.color)
+                .collect::<Vec<_>>(),
+            colors
+        );
+        assert_eq!(updated.reviews[4].color, 8);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_rename_retry_only_retries_windows_sharing_errors() {
+        use std::io;
+
+        assert!(is_windows_replace_contention(
+            &io::Error::from_raw_os_error(5)
+        ));
+        assert!(is_windows_replace_contention(
+            &io::Error::from_raw_os_error(32)
+        ));
+        assert!(is_windows_replace_contention(
+            &io::Error::from_raw_os_error(33)
+        ));
+        assert!(!is_windows_replace_contention(
+            &io::Error::from_raw_os_error(2)
+        ));
+
+        let mut attempts = 0;
+        rename_with_retry(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    Ok(())
+                }
+            },
+            is_windows_replace_contention,
+        )
+        .unwrap();
+        assert_eq!(attempts, 3);
+
+        let mut permanent_attempts = 0;
+        assert!(rename_with_retry(
+            || {
+                permanent_attempts += 1;
+                Err(io::Error::from_raw_os_error(2))
+            },
+            is_windows_replace_contention,
+        )
+        .is_err());
+        assert_eq!(permanent_attempts, 1);
     }
 }

@@ -74,7 +74,7 @@ that survives a build deleting and recreating the file mid-compile.
   in Latin Modern — no JavaScript math engine, nothing fetched, and the MathML meets the same
   sanitizer as the prose.
 - **Markdown typography:** Rendered text is set in Latin Modern Roman at 17 px on a 38 em measure, hyphenated with `text-wrap: pretty` for natural word breaks. Zoom reflows the text rather than scaling it.
-- **Ask and the Review panel.** Select text in Markdown or a PDF — the locator is the only difference (`at.line` vs `at.page`). `Ctrl+Shift+A` copies that record as a Markdown quote headed by `collab.md:12-18` or `paper.pdf p.7`. Select a sentence and press Enter to open a comment box on it — type and press Enter again to save. `Ctrl+Shift+N`, a right-click, or the chip after a short hold do the same. Each review is numbered `page.n` (`1.1`, `1.2`, `2.1`…; Markdown uses the same shape, counting distinct locations in reading order). The number sits on the highlighted words and on the Review row. Marks cycle six colours (red, then blue, …) and the row uses the same tint. `Ctrl+Shift+R` toggles the panel. − and + in the panel head change the comment size. A new comment or an edit writes `{stem}_review.json` immediately (`paper.pdf` → `paper_review.json`). An agent (or editor) can change that file at the same time: adds, fixes and deletes show in the panel without reloading the PDF, even if document poll is off. Capped at 20,000 characters of quote; not available for images.
+- **Ask and the Review panel.** Select rendered text and create a Delete or Improve request. A review keeps the original quote, PDF page and context, stable ID, action, status and resolution in `{stem}_review.json` (`paper.pdf` → `paper_review.json`). Delete means “remove this passage from the source”; saving a request never changes a PDF or source file. Improve carries its instruction in `comment`. The Review panel shows each request and tracks it through open, applied and resolved. An agent records a successful source edit and build as applied; you verify the recompiled PDF before resolving it. `Ctrl+Shift+R` toggles the panel. − and + in the panel head change the comment size. Not available for images.
 - **Copy the path or the name** from the two buttons after zoom: the full path as a person would type it, or just the file name.
 - **Reduce a PDF** with the toolbar button next to Print. A pure-Rust pass (no Ghostscript) writes `{stem}_reduced.pdf` beside the original when it can shrink the file; the original stays untouched and the smaller copy opens as a tab.
 - **Changed blocks light up on reload:** When a Markdown file rewrites, changed and new paragraphs, headings, list items, tables and equations fade from a highlight over a few seconds. The comparison is by content: adding a paragraph marks only that one. Scroll position is kept.
@@ -103,7 +103,7 @@ that survives a build deleting and recreating the file mid-compile.
   sheets as text, and an image gets a sheet to itself. A document whose pages are not all the
   same size follows the first one, as it does in every other viewer. If the machine has nothing
   to print to — no printer, or a stopped print service — it says so rather than opening nothing.
-- **The title says which build you are running** — `paper.pdf — pdf-next 0.13.2` — so a bug report
+- **The title says which build you are running** — `paper.pdf — pdf-next 0.14.0` — so a bug report
   can name a version without hunting for an about box.
 - **Tells you when there is a newer version.** A few seconds after launch the app asks
   GitHub for the latest release, once; if it is newer, the last toolbar button lights up and a
@@ -307,6 +307,57 @@ Then `which pdf-next`, `pdf-next --help` and `pdf-next report.pdf` all work as a
 agent has a project instructions file, one line — *"open PDFs with `pdf-next <file>`; use
 `open -a pdf-next` on macOS if the shim is missing"* — saves it rediscovering this each time.
 
+#### PDF review tasks for agents
+
+The review sidecar is a task list for editing the project source. The intended loop is:
+
+1. Read the current tasks with `pdf-next reviews list paper.pdf`.
+2. Find the selected PDF quote in the LaTeX entry point or its included chapter files. Use its
+   quote, surrounding context and PDF position together. An optional SyncTeX source hint is a
+   candidate to check against the actual source.
+3. Edit the relevant `.tex` source, then compile the project's entry point.
+4. After a successful build, record the source path, build result and resolution on the same
+   review ID. Leave failed builds open. Mark the task `applied` only after compilation succeeds.
+5. Leave it `applied` until the reader checks the rendered PDF and marks it `resolved`.
+
+For example, save this object in `patch.json` after checking the current revision:
+
+```json
+{
+  "status": "applied",
+  "resolution": "Reworded the paragraph and compiled paper.tex successfully.",
+  "source": { "file": "chapters/method.tex" },
+  "build": { "success": true, "command": "latexmk -pdf paper.tex" }
+}
+```
+
+Then update only that record:
+
+```bash
+pdf-next reviews list paper.pdf
+pdf-next reviews update paper.pdf --id r12 --patch patch.json --expected-revision 8
+```
+
+Use the `revision` printed by `list` for `--expected-revision`. A concurrent update causes a
+conflict; reread the store and prepare the patch again instead of overwriting it. `--dry-run`
+checks a patch and prints the proposed JSON without saving it. The source field uses the
+key `file` for the path actually edited. A SyncTeX hint in that field carries
+`method: "synctex"` and `verified: false`; replace it with the source you verified.
+Updates preserve unrelated fields and records. Each supplied field replaces its
+previous value; include the complete object when replacing `anchor`, `source`, or
+`build` so its other keys survive. The sidecar format and a complete record example are in
+[`docs/_review.json`](docs/_review.json).
+
+Use the CLI mutation command instead of editing the JSON directly. A raw writer must preserve
+IDs and unknown fields, write atomically, and check the sidecar revision; writers that skip
+that protocol can overwrite concurrent changes.
+
+The PDF quote is a rendered-text target, not a `.tex` line number. LaTeX commands, macros,
+hyphenation, equations and included files can change how text appears. Check the surrounding
+source before editing; an equation symbol needs its equation context and position, so do not
+copy a symbol in isolation. Record the source file that actually changed. A disappeared quote
+does not prove that a Delete request succeeded, and completing a task never removes its record.
+
 ## Security
 
 The threat model is the obvious one: you open a PDF someone sent you, and the attacker controls
@@ -321,7 +372,8 @@ every byte of it.
 - **The webview can read exactly the files you opened.** Document bytes are served by a
   purpose-built `doc://` protocol whose handler checks every request against the set of files
   you opened this session — an allowlist in our own Rust code, populated only by the open
-  path. Even injected script has no reach beyond that.
+  path. Review commands also access the adjacent review sidecar and query an optional
+  local SyncTeX mapping; source hints must point to `.tex` files inside the PDF folder.
 - **Markdown is sanitized before it exists as HTML.** A `.md` is parsed and scrubbed by
   ammonia on the Rust side; scripts, event handlers and `javascript:` URLs never cross into
   the window, images are stripped so a file cannot probe your disk, and the CSP forbids

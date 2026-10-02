@@ -35,6 +35,16 @@
   --review-5-line: #7a28b8;
   --review-6: rgba(10, 140, 140, 0.26);
   --review-6-line: #0d7a7a;
+  --review-7: rgba(190, 150, 0, 0.3); --review-7-line: #907000;
+  --review-8: rgba(220, 50, 125, 0.25); --review-8-line: #b52c68;
+  --review-9: rgba(110, 145, 20, 0.27); --review-9-line: #607c12;
+  --review-10: rgba(215, 95, 80, 0.28); --review-10-line: #ad4a3e;
+  --review-11: rgba(60, 125, 155, 0.28); --review-11-line: #356e88;
+  --review-12: rgba(150, 90, 100, 0.27); --review-12-line: #874f5b;
+  --review-13: rgba(135, 90, 45, 0.3); --review-13-line: #79502b;
+  --review-14: rgba(90, 80, 170, 0.27); --review-14-line: #51469a;
+  --review-15: rgba(30, 135, 115, 0.27); --review-15-line: #1f7969;
+  --review-16: rgba(85, 100, 125, 0.3); --review-16-line: #4e5b73;
   --review-fill: var(--review-1);
   --review-line: var(--review-1-line);
 
@@ -79,6 +89,16 @@
   --review-5-line: #c090f0;
   --review-6: rgba(80, 210, 200, 0.36);
   --review-6-line: #5ecfc4;
+  --review-7: rgba(255, 205, 65, 0.38); --review-7-line: #e5bd55;
+  --review-8: rgba(255, 100, 170, 0.34); --review-8-line: #ee78aa;
+  --review-9: rgba(190, 220, 70, 0.35); --review-9-line: #bad64f;
+  --review-10: rgba(255, 125, 105, 0.35); --review-10-line: #f28a79;
+  --review-11: rgba(95, 190, 220, 0.34); --review-11-line: #70c0da;
+  --review-12: rgba(215, 130, 150, 0.34); --review-12-line: #df9aaa;
+  --review-13: rgba(205, 150, 95, 0.34); --review-13-line: #d1a16c;
+  --review-14: rgba(150, 140, 235, 0.34); --review-14-line: #a49af0;
+  --review-15: rgba(75, 205, 170, 0.34); --review-15-line: #6bceb2;
+  --review-16: rgba(150, 170, 205, 0.34); --review-16-line: #a1b3d0;
 }
 
 :root[data-theme='light'] {
@@ -119,6 +139,16 @@
     --review-5-line: #c090f0;
     --review-6: rgba(80, 210, 200, 0.36);
     --review-6-line: #5ecfc4;
+    --review-7: rgba(255, 205, 65, 0.38); --review-7-line: #e5bd55;
+    --review-8: rgba(255, 100, 170, 0.34); --review-8-line: #ee78aa;
+    --review-9: rgba(190, 220, 70, 0.35); --review-9-line: #bad64f;
+    --review-10: rgba(255, 125, 105, 0.35); --review-10-line: #f28a79;
+    --review-11: rgba(95, 190, 220, 0.34); --review-11-line: #70c0da;
+    --review-12: rgba(215, 130, 150, 0.34); --review-12-line: #df9aaa;
+    --review-13: rgba(205, 150, 95, 0.34); --review-13-line: #d1a16c;
+    --review-14: rgba(150, 140, 235, 0.34); --review-14-line: #a49af0;
+    --review-15: rgba(75, 205, 170, 0.34); --review-15-line: #6bceb2;
+    --review-16: rgba(150, 170, 205, 0.34); --review-16-line: #a1b3d0;
   }
 }
 
@@ -488,6 +518,29 @@ body.review-open #markdownStage {
   line-height: 1;
 }
 
+.review-filters {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 11px;
+}
+
+.review-filters label,
+.note-action-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.review-filters select,
+.note-action-label select {
+  min-width: 0;
+  height: 23px;
+  padding: 0 4px;
+  font: inherit;
+}
+
 #reviewList {
   flex: 1 1 auto;
   overflow: auto;
@@ -517,12 +570,35 @@ body.review-open #markdownStage {
   border-color: var(--review-line);
 }
 
+.review-row.conflict {
+  outline: 2px solid var(--error);
+}
+
+.review-row.unlocated .review-status {
+  color: var(--error);
+}
+
 .review-loc {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 0.92em;
   color: var(--fg-dim);
+}
+
+.review-action-label {
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.review-status {
+  color: var(--fg-dim);
+  font-size: 0.9em;
+}
+
+.review-row[data-action='delete'] > .review-quote {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
 }
 
 .review-row > .review-quote {
@@ -582,6 +658,16 @@ body.review-open #markdownStage {
   --review-fill: var(--review-6);
   --review-line: var(--review-6-line);
 }
+[data-review-tint='7'] { --review-fill: var(--review-7); --review-line: var(--review-7-line); }
+[data-review-tint='8'] { --review-fill: var(--review-8); --review-line: var(--review-8-line); }
+[data-review-tint='9'] { --review-fill: var(--review-9); --review-line: var(--review-9-line); }
+[data-review-tint='10'] { --review-fill: var(--review-10); --review-line: var(--review-10-line); }
+[data-review-tint='11'] { --review-fill: var(--review-11); --review-line: var(--review-11-line); }
+[data-review-tint='12'] { --review-fill: var(--review-12); --review-line: var(--review-12-line); }
+[data-review-tint='13'] { --review-fill: var(--review-13); --review-line: var(--review-13-line); }
+[data-review-tint='14'] { --review-fill: var(--review-14); --review-line: var(--review-14-line); }
+[data-review-tint='15'] { --review-fill: var(--review-15); --review-line: var(--review-15-line); }
+[data-review-tint='16'] { --review-fill: var(--review-16); --review-line: var(--review-16-line); }
 
 /* Wash only. Never change the typeface. PDF uses <review-q> (not span):
    PDF.js forces every textLayer span to position:absolute, so a nested
@@ -634,9 +720,16 @@ mark.review,
   font: 600 10px/1 var(--ui-font);
   letter-spacing: 0.02em;
   text-shadow: 0 1px 1px rgb(0 0 0 / 0.35);
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
+}
+
+.textLayer review-q[data-review-action='delete'],
+mark.review[data-review-action='delete'] {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
 }
 
 .page > .review-no {
@@ -859,9 +952,25 @@ body.mode-invert .pdfViewer .page .canvasWrapper {
   margin-bottom: 2px;
 }
 
+.note-quote {
+  width: min(320px, calc(100vw - 32px));
+  max-height: 8em;
+  overflow: auto;
+  padding: 5px 7px;
+  border-left: 3px solid var(--accent);
+  background: var(--hover);
+  line-height: 1.35;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.note-action-label {
+  font-size: 0.9em;
+  color: var(--fg-dim);
+}
+
 #noteText {
-  width: 240px;
-  max-width: min(240px, calc(100vw - 32px));
+  width: min(320px, calc(100vw - 32px));
   padding: 2px 4px;
   border: 1px solid var(--widget-border);
   border-radius: 2px;

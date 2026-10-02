@@ -1,12 +1,12 @@
 [package]
 name = "pdf-next"
-version = "0.13.2"
+version = "0.14.0"
 description = "Tiny, fast PDF, image and markdown viewer that reloads when the file changes"
 authors = ["Ricardo Frantz"]
 license = "MIT"
 repository = "https://github.com/ricardofrantz/pdf-next"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -19,6 +19,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10.9"
 tempfile = "3"
 # Markdown is parsed and sanitized on this side of the IPC boundary: the
 # webview only ever sees HTML that ammonia has already scrubbed.

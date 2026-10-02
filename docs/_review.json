@@ -1,22 +1,32 @@
 {
-  "$comment": "One review record. Markdown and PDF only differ in `at`. The sidecar next to paper.pdf is paper_review.json. The Review panel lists these; marks are painted from them. Display numbers (1.1, 2.1) are derived: page.n on a PDF, location-rank.n on Markdown.",
-  "format": 2,
+  "$comment": "Format 3 review sidecar example for paper.pdf. The adjacent file is paper_review.json. Keep one canonical reviews array. The app and agents preserve unknown extension fields. The revision increments after every successful write; nextId is monotonic and IDs are never reused. Markdown records use at.line; PDF records use at.page.",
+  "format": 3,
+  "revision": 12,
+  "nextId": 3,
+  "document": {
+    "task": "Review the compiled PDF and edit its LaTeX source.",
+    "pdf": "paper.pdf",
+    "project": ".",
+    "tex": "paper.tex"
+  },
   "reviews": [
     {
       "id": "r1",
-      "file": "collab.md",
-      "kind": "markdown",
-      "at": { "line": 12, "end": 18 },
-      "quote": "the selected passage, same shape as a PDF quote",
-      "comment": "tighten this"
-    },
-    {
-      "id": "r2",
       "file": "paper.pdf",
       "kind": "pdf",
       "at": { "page": 7 },
-      "quote": "the selected passage, same shape as a Markdown quote",
-      "comment": "does the figure still match?"
+      "quote": "the selected passage from the rendered PDF",
+      "comment": "Make the explanation clearer.",
+      "action": "improve",
+      "status": "open",
+      "resolution": "",
+      "color": 3,
+      "anchor": {
+        "prefix": "preceding PDF context",
+        "suffix": "following PDF context",
+        "documentRevision": "sha256:example",
+        "position": { "page": 7, "x": 120.0, "y": 240.0 }
+      }
     }
   ]
 }

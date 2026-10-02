@@ -264,17 +264,31 @@
 
       <aside id="reviewPane" hidden>
         <div class="review-head">
-          <span>Review</span>
+          <span>Review <small id="reviewCount" class="dim"></small></span>
           <span class="review-size" role="group" aria-label="Review text size">
             <button id="reviewSizeDown" type="button" title="Smaller review text" aria-label="Smaller review text">−</button>
             <button id="reviewSizeUp" type="button" title="Larger review text" aria-label="Larger review text">+</button>
           </span>
+        </div>
+        <div class="review-filters">
+          <label>Action <select id="reviewActionFilter" aria-label="Filter reviews by action">
+            <option value="all">All</option><option value="delete">Delete</option><option value="improve">Improve</option>
+          </select></label>
+          <label>Status <select id="reviewStatusFilter" aria-label="Filter reviews by status">
+            <option value="all">All</option><option value="open">Open</option><option value="applied">Applied</option><option value="resolved">Resolved</option>
+          </select></label>
         </div>
         <div id="reviewList"></div>
       </aside>
 
       <div id="noteBox" hidden>
         <div id="noteRef"></div>
+        <div id="noteQuote" class="note-quote" aria-label="Selected text"></div>
+        <label class="note-action-label">Action
+          <select id="noteAction" aria-label="Review action">
+            <option value="improve">Improve</option><option value="delete">Delete selection</option>
+          </select>
+        </label>
         <input id="noteText" type="text" placeholder="Comment (Enter to save, Esc to cancel)" />
         <button id="noteSave" type="button">Save</button>
       </div>
@@ -283,7 +297,8 @@
         <svg class="icon"><use href="#i-add-review"/></svg>
       </button>
       <div id="reviewMenu" hidden role="menu">
-        <button id="reviewMenuAdd" type="button" role="menuitem">Add review</button>
+        <button id="reviewMenuAdd" type="button" role="menuitem">Improve selection</button>
+        <button id="reviewMenuDelete" type="button" role="menuitem">Delete selection</button>
       </div>
 
       <div id="empty">
