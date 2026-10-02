@@ -2058,6 +2058,28 @@ struct ReviewLock(std::fs::File);
 
 impl ReviewLock {
     fn acquire(sidecar: &Path) -> Result<Self, String> {
+        let file = Self::open(sidecar).map_err(|error| error.to_string())?;
+        Self::wait(file)
+    }
+
+    /// Like `acquire`, but `None` when the folder does not let us create the
+    /// lock file. Reads then go ahead without it.
+    fn acquire_for_read(sidecar: &Path) -> Result<Option<Self>, String> {
+        match Self::open(sidecar) {
+            Ok(file) => Self::wait(file).map(Some),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn open(sidecar: &Path) -> std::io::Result<std::fs::File> {
         let lock_path = sidecar.with_extension(format!(
             "{}.lock",
             sidecar
@@ -2065,13 +2087,15 @@ impl ReviewLock {
                 .and_then(|ext| ext.to_str())
                 .unwrap_or("json")
         ));
-        let file = std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
             .open(lock_path)
-            .map_err(|error| error.to_string())?;
+    }
+
+    fn wait(file: std::fs::File) -> Result<Self, String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         loop {
             match file.try_lock() {
@@ -2291,10 +2315,12 @@ fn read_snapshot(doc_path: &Path) -> Result<Option<ReviewFile>, String> {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(LEGACY_REVIEW_FILE);
-    let _lock = ReviewLock::acquire(&sidecar)?;
     if !sidecar.exists() && !legacy.exists() {
         return Ok(None);
     }
+    // Saves replace the sidecar by rename, so an unlocked read never sees a
+    // partial file. A read-only folder cannot hold the lock file.
+    let _lock = ReviewLock::acquire_for_read(&sidecar)?;
     let basename = document_basename(doc_path)?;
     let (_sidecar, store) = load_store(doc_path)?;
     Ok(Some(reviews_for_file(store, &basename)))
@@ -2378,7 +2404,6 @@ fn list_reviews(document: &str, allowed: &HashSet<PathBuf>) -> Result<ReviewFile
     match read_snapshot(&doc_path)? {
         Some(snapshot) => Ok(snapshot),
         None => {
-            let _lock = ReviewLock::acquire(&review_sidecar(&doc_path))?;
             let (_sidecar, store) = load_store(&doc_path)?;
             Ok(reviews_for_file(store, &basename))
         }
@@ -4414,6 +4439,47 @@ mod tests {
         let expected = as_javascript_sends(serde_json::to_value(&listed.reviews[1]).unwrap());
         let left = remove_review_cas(path, "r2", &expected, &allowed).unwrap();
         assert_eq!(left.reviews.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reading_reviews_creates_no_lock_file_when_no_sidecar_exists() {
+        let dir = scratch("review_read_no_lock");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let allowed = HashSet::from([std::fs::canonicalize(&pdf).unwrap()]);
+        let path = std::fs::canonicalize(&pdf).unwrap();
+        assert!(read_snapshot(&path).unwrap().is_none());
+        assert!(list_reviews(pdf.to_str().unwrap(), &allowed)
+            .unwrap()
+            .reviews
+            .is_empty());
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [OsString::from("paper.pdf")]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reviews_in_a_read_only_folder_can_still_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("review_read_only_folder");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        std::fs::write(
+            review_sidecar(&pdf),
+            r#"{"format":3,"revision":1,"nextId":2,"reviews":[{"id":"r1","file":"paper.pdf","kind":"pdf","at":{"page":1},"quote":"kept"}]}"#,
+        )
+        .unwrap();
+        let path = std::fs::canonicalize(&pdf).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let read = read_snapshot(&path);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(read.unwrap().unwrap().reviews[0].quote, "kept");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
