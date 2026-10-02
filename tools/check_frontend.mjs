@@ -1559,10 +1559,10 @@ assert.notEqual(reviewStateKey('a.pdf', 'r1'), reviewStateKey('b.pdf', 'r1'),
     'A quote across inline math pieces is located.');
   assert.equal(resolveReviewAnchor([{ page: 1, text: 'u τ and u τ' }], 'uτ').status, 'ambiguous',
     'A repeated quote stays ambiguous when spaces are ignored.');
-  assert.equal(resolveReviewAnchor([{ page: 3, text: 'flow within the wake region' }], 'in the wake').status,
-    'unlocated', 'A deleted quote is not found again inside a longer word.');
-  assert.equal(resolveReviewAnchor([{ page: 3, text: 'the wakes form' }], 'the wake').status,
-    'unlocated', 'A match that ignores spaces must also end at a word boundary.');
+  assert.equal(resolveReviewAnchor([{ page: 3, text: 'flow within the wa ke region' }], 'in the wake').status,
+    'unlocated', 'A match that ignores spaces must start at a word boundary.');
+  assert.equal(resolveReviewAnchor([{ page: 3, text: 'the wa kes form' }], 'the wake').status,
+    'unlocated', 'A match that ignores spaces must end at a word boundary.');
   assert.deepEqual(resolveReviewAnchor([{ page: 1, text: 'ab and a b' }], 'ab'),
     { status: 'located', page: 1, start: 0, end: 2 },
     'An exact match wins over a match that ignores spaces.');
