@@ -335,6 +335,36 @@ for (const pauseAt of ['save', 'close']) {
 }
 
 {
+  const key = 'a.pdf\u0000r1';
+  const pendingComments = new Map([[key, { id: 'r1', path: 'a.pdf', comment: 'first', expectedComment: '' }]]);
+  const saved = [];
+  let releaseFirst;
+  const context = {
+    state: { file: { path: 'a.pdf' }, reviews: [{ id: 'r1' }], reviewConflicts: new Map() },
+    pendingComments,
+    commentSaveTimer: 0,
+    commentFlushPromise: null,
+    window: { clearTimeout() {} },
+    commentDraftKey: (path, id) => `${path}\u0000${id}`,
+    reviewStateKey: (path, id) => `${path}\u0000${id}`,
+    renderReviewList() {},
+    updateReviewComment: async (pending) => {
+      saved.push(pending.comment);
+      if (saved.length === 1) await new Promise((resolve) => { releaseFirst = resolve; });
+      if (pendingComments.get(key) === pending) pendingComments.delete(key);
+    },
+  };
+  const flush = appFunction('flushCommentSave', 'async function updateReviewComment(', context);
+  const first = flush();
+  pendingComments.set(key, { id: 'r1', path: 'a.pdf', comment: 'second', expectedComment: 'first' });
+  const second = flush();
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(saved, ['first', 'second'], 'A flush requested during a save also saves the newer draft.');
+  assert.equal(pendingComments.size, 0);
+}
+
+{
   const original = [{ id: 'b1', file: 'b.pdf' }];
   const state = { file: { path: 'a.pdf' }, generation: 1, reviews: [], reviewConflicts: new Set() };
   const pending = { id: 'r1', path: 'a.pdf', comment: 'edited', expectedComment: 'old' };

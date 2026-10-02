@@ -2385,6 +2385,7 @@ function reviewRowById(id) {
 
 let commentSaveTimer = 0;
 let commentFlushPromise = null;
+let commentFlushAgain = false;
 const pendingComments = new Map();
 
 function commentDraftKey(path, id) {
@@ -2769,22 +2770,30 @@ function scheduleCommentSave(id, comment) {
 async function flushCommentSave() {
   window.clearTimeout(commentSaveTimer);
   commentSaveTimer = 0;
-  if (commentFlushPromise) return commentFlushPromise;
+  if (commentFlushPromise) {
+    // The running save took its list of drafts before this call. Run the
+    // list again when it ends, so an edit made during the save is not left.
+    commentFlushAgain = true;
+    return commentFlushPromise;
+  }
   commentFlushPromise = (async () => {
-    for (const pending of [...pendingComments.values()]) {
-      if (pending.path === state.file?.path && !state.reviews.some((review) => review.id === pending.id)) {
-        state.reviewConflicts.set(reviewStateKey(pending.path, pending.id), { reason: 'removed' });
-        renderReviewList();
-        continue;
-      }
-      if (String(pending.comment).trim() === String(pending.expectedComment).trim()) {
-        if (pendingComments.get(commentDraftKey(pending.path, pending.id)) === pending) {
-          pendingComments.delete(commentDraftKey(pending.path, pending.id));
+    do {
+      commentFlushAgain = false;
+      for (const pending of [...pendingComments.values()]) {
+        if (pending.path === state.file?.path && !state.reviews.some((review) => review.id === pending.id)) {
+          state.reviewConflicts.set(reviewStateKey(pending.path, pending.id), { reason: 'removed' });
+          renderReviewList();
+          continue;
         }
-        continue;
+        if (String(pending.comment).trim() === String(pending.expectedComment).trim()) {
+          if (pendingComments.get(commentDraftKey(pending.path, pending.id)) === pending) {
+            pendingComments.delete(commentDraftKey(pending.path, pending.id));
+          }
+          continue;
+        }
+        await updateReviewComment(pending, { quiet: true });
       }
-      await updateReviewComment(pending, { quiet: true });
-    }
+    } while (commentFlushAgain);
   })();
   try {
     await commentFlushPromise;
