@@ -261,6 +261,15 @@ function open(binary, file, seconds) {
               throw new Error('initial smoke report did not include a source revision');
             }
             let finalBytes = bytes;
+            unlinkSync(sidecar);
+            const missingDeadline = Date.now() + 5000;
+            while (!output.includes('sidecarMissingReviews=32')) {
+              if (Date.now() >= missingDeadline) {
+                throw new Error('viewer did not preserve 32 reviews while the sidecar was missing');
+              }
+              await pause(100);
+            }
+            writeFileSync(sidecar, reviewStore(file, 1, fixtureReviews));
             for (let revision = 1; revision <= 2; revision += 1) {
               finalBytes = Buffer.concat([
                 bytes,

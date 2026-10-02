@@ -1607,6 +1607,28 @@ assert.equal(mapCollapsedIndex('a  b', 2), 3);
   assert.equal(state.reviewConflicts.get('a.pdf\u0000r1').reason, 'removed');
 }
 {
+  const pending = { id: 'r1', path: 'a.pdf', comment: 'mine', expectedComment: 'old', original: { id: 'r1', quote: 'audit quote' } };
+  const pendingComments = new Map([['a.pdf\u0000r1', pending]]);
+  const conflict = new Map([['a.pdf\u0000r1', { reason: 'changed' }]]);
+  const state = { file: { path: 'a.pdf' }, generation: 1, reviewConflicts: conflict };
+  let status = '';
+  let updated = false;
+  const saveDraft = appFunction('saveDraftAfterConflict', 'async function reattachReview(', {
+    state, pendingComments,
+    commentDraftKey: (path, id) => `${path}\u0000${id}`,
+    reviewStateKey: (path, id) => `${path}\u0000${id}`,
+    invoke: async () => null,
+    applyReviewStore() {}, renderReviewList() {},
+    updateReviewComment: async () => { updated = true; },
+    setStatus(message) { status = message; },
+  });
+  await saveDraft('r1');
+  assert.equal(updated, false, 'A missing sidecar does not authorize rebasing a draft or recreating a review.');
+  assert.equal(pendingComments.get('a.pdf\u0000r1'), pending, 'The draft survives a temporarily missing sidecar.');
+  assert.equal(conflict.get('a.pdf\u0000r1').reason, 'changed');
+  assert.match(status, /temporarily unavailable/);
+}
+{
   const pending = { id: 'r1', path: 'a.pdf', comment: 'saved edit', expectedComment: 'saved edit', original: { id: 'r1', comment: 'old' } };
   const pendingComments = new Map([['a.pdf\u0000r1', pending]]);
   const state = {
@@ -1624,6 +1646,37 @@ assert.equal(mapCollapsedIndex('a  b', 2), 3);
   });
   await load();
   assert.equal(pendingComments.has('a.pdf\u0000r1'), false, 'A draft reconciled to the saved disk value is removed from the pending map.');
+}
+{
+  const records = Array.from({ length: 32 }, (_, index) => ({ id: `r${index + 1}`, quote: `Scroll render ${index * 8}`, comment: '' }));
+  const draft = { id: 'r1', path: 'a.pdf', comment: 'unsaved', expectedComment: '', original: records[0] };
+  const pendingComments = new Map([['a.pdf\u0000r1', draft]]);
+  const state = {
+    file: { path: 'a.pdf', kind: 'pdf' }, generation: 1, reviewDocumentPath: 'a.pdf',
+    reviewRevision: 4, reviews: records, reviewConflicts: new Map(), reviewLocations: new Map(),
+  };
+  let read = null;
+  let rendered = null;
+  const load = appFunction('loadReviews', '/// Disk first.', {
+    state, pendingComments,
+    commentDraftKey: (path, id) => `${path}\u0000${id}`,
+    reviewStateKey: (path, id) => `${path}\u0000${id}`,
+    draftsForPath: () => new Map([['r1', pendingComments.get('a.pdf\u0000r1')]].filter(([, item]) => item)),
+    reconcilePendingComments,
+    invoke: async () => read,
+    applyReviewStore(store, options) { rendered = { store, options }; state.reviews = store.reviews; },
+    setStatus() {},
+  });
+  await load();
+  assert.equal(state.reviews.length, 32, 'A missing sidecar cannot erase the last valid review panel.');
+  assert.equal(pendingComments.get('a.pdf\u0000r1'), draft, 'A missing sidecar preserves pending drafts.');
+  assert.equal(rendered, null, 'A null IPC result is not treated as a valid empty store.');
+  read = { revision: 5, nextId: 33, reviews: records };
+  await load();
+  assert.equal(state.reviews.length, 32, 'The panel restores when its sidecar returns.');
+  read = { revision: 6, nextId: 1, reviews: [] };
+  await load();
+  assert.equal(state.reviews.length, 0, 'A valid empty store clears reviews.');
 }
 {
   const state = { file: { path: 'a.pdf' }, reviewDocumentPath: 'a.pdf', reviewRevision: 8, reviews: [] };

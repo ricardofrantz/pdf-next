@@ -2440,6 +2440,14 @@ async function loadReviews({ fromDisk = false } = {}) {
       state.reviewConflicts.clear();
       state.reviewLocations.clear();
     }
+    if (store == null) {
+      if (state.reviewDocumentPath === path) {
+        setStatus('Review data temporarily unavailable; existing reviews and drafts are preserved.', { error: true });
+        return;
+      }
+      applyReviewStore({ reviews: [] }, { authoritative: true });
+      return;
+    }
     const diskReviews = Array.isArray(store?.reviews) ? store.reviews : [];
     for (const key of state.reviewConflicts.keys()) {
       if (key.startsWith(`${path}\u0000`)) state.reviewConflicts.delete(key);
@@ -2889,6 +2897,10 @@ async function saveDraftAfterConflict(id) {
   try {
     const store = await invoke('read_reviews', { document: path });
     if (state.generation !== generation || state.file?.path !== path) return;
+    if (store == null) {
+      setStatus('Review data temporarily unavailable; your draft is preserved.', { error: true });
+      return;
+    }
     const current = store?.reviews?.find((review) => review.id === id);
     if (!current) {
       state.reviewConflicts.set(reviewStateKey(path, id), { reason: 'removed' });
@@ -4127,6 +4139,12 @@ listen('reviews-changed', async (event) => {
     return;
   }
   await reloadReviewsFromDisk();
+  if (launch?.smoke && state.file?.name === 'dense-page.pdf' && event.payload?.kind === 'missing') {
+    await invoke('smoke_report', {
+      ok: state.reviews.length === 32,
+      detail: `sidecar missing; sidecarMissingReviews=${state.reviews.length}`,
+    });
+  }
 });
 
 listen('file-changed', async (event) => {

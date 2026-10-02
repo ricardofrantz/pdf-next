@@ -2285,6 +2285,21 @@ fn reviews_for_file(store: ReviewFile, basename: &str) -> ReviewFile {
     }
 }
 
+fn read_snapshot(doc_path: &Path) -> Result<Option<ReviewFile>, String> {
+    let sidecar = review_sidecar(doc_path);
+    let legacy = doc_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(LEGACY_REVIEW_FILE);
+    let _lock = ReviewLock::acquire(&sidecar)?;
+    if !sidecar.exists() && !legacy.exists() {
+        return Ok(None);
+    }
+    let basename = document_basename(doc_path)?;
+    let (_sidecar, store) = load_store(doc_path)?;
+    Ok(Some(reviews_for_file(store, &basename)))
+}
+
 fn open_review_document(document: &str, allowed: &HashSet<PathBuf>) -> Result<PathBuf, String> {
     let doc_path =
         std::fs::canonicalize(PathBuf::from(document)).map_err(|error| error.to_string())?;
@@ -2360,9 +2375,14 @@ fn write_review(
 fn list_reviews(document: &str, allowed: &HashSet<PathBuf>) -> Result<ReviewFile, String> {
     let doc_path = open_review_document(document, allowed)?;
     let basename = document_basename(&doc_path)?;
-    let _lock = ReviewLock::acquire(&review_sidecar(&doc_path))?;
-    let (_sidecar, store) = load_store(&doc_path)?;
-    Ok(reviews_for_file(store, &basename))
+    match read_snapshot(&doc_path)? {
+        Some(snapshot) => Ok(snapshot),
+        None => {
+            let _lock = ReviewLock::acquire(&review_sidecar(&doc_path))?;
+            let (_sidecar, store) = load_store(&doc_path)?;
+            Ok(reviews_for_file(store, &basename))
+        }
+    }
 }
 
 fn change_review_comment(
@@ -2555,8 +2575,12 @@ fn append_review(
 }
 
 #[tauri::command]
-fn read_reviews(document: String, watched: State<'_, Watched>) -> Result<ReviewFile, String> {
-    list_reviews(&document, &allowed_set(&watched)?)
+fn read_reviews(
+    document: String,
+    watched: State<'_, Watched>,
+) -> Result<Option<ReviewFile>, String> {
+    let doc_path = open_review_document(&document, &allowed_set(&watched)?)?;
+    read_snapshot(&doc_path)
 }
 
 #[tauri::command]
@@ -3356,9 +3380,9 @@ mod tests {
     use super::{
         change_review_comment, document_watch_due, is_windows_replace_contention, list_reviews,
         natural_key, next_review_id, open_download, open_link, parse_cli, parse_store,
-        patch_review_record, reduced_pdf_path, remove_review, remove_review_cas, rename_with_retry,
-        render_markdown, shrink_pdf_bytes, sidecar_ready, write_review, Cli, Review, ReviewAt,
-        Target,
+        patch_review_record, read_snapshot, reduced_pdf_path, remove_review, remove_review_cas,
+        rename_with_retry, render_markdown, shrink_pdf_bytes, sidecar_ready, write_review, Cli,
+        Review, ReviewAt, Target,
     };
     use std::collections::HashSet;
     use std::ffi::OsString;
@@ -4262,6 +4286,38 @@ mod tests {
         let allowed = HashSet::from([std::fs::canonicalize(&md).unwrap()]);
         assert!(write_review(md.to_str().unwrap(), markdown_review(), &allowed).is_err());
         assert_eq!(std::fs::read(&sidecar).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_snapshot_distinguishes_missing_empty_partial_and_legacy_sidecars() {
+        let dir = scratch("review_snapshot_presence");
+        let pdf = dir.join("paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.1\n%%EOF\n").unwrap();
+        let path = std::fs::canonicalize(&pdf).unwrap();
+        assert!(read_snapshot(&path).unwrap().is_none());
+
+        let sidecar = review_sidecar(&pdf);
+        std::fs::write(
+            &sidecar,
+            r#"{"format":3,"revision":4,"nextId":1,"reviews":[]}"#,
+        )
+        .unwrap();
+        let empty = read_snapshot(&path).unwrap().unwrap();
+        assert!(empty.reviews.is_empty());
+        assert_eq!(empty.revision, 4);
+
+        std::fs::write(&sidecar, "{\"format\":3,\"reviews\":[").unwrap();
+        assert!(read_snapshot(&path).is_err());
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::write(
+            dir.join(LEGACY_REVIEW_FILE),
+            r#"{"format":1,"reviews":[{"id":"r1","file":"paper.pdf","kind":"pdf","at":{"page":2},"quote":"legacy"}]}"#,
+        )
+        .unwrap();
+        let legacy = read_snapshot(&path).unwrap().unwrap();
+        assert_eq!(legacy.reviews.len(), 1);
+        assert_eq!(legacy.reviews[0].quote, "legacy");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
