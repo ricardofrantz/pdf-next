@@ -89,8 +89,8 @@ certificates per signature.
 Check one locally before submitting:
 
 ```
-winget validate --manifest winget/RicardoFrantz.pdf-next/0.14.1
-winget install --manifest winget/RicardoFrantz.pdf-next/0.14.1
+winget validate --manifest winget/RicardoFrantz.pdf-next/0.14.3
+winget install --manifest winget/RicardoFrantz.pdf-next/0.14.3
 ```
 
 To publish a version, copy its folder into a fork of winget-pkgs at
@@ -123,8 +123,8 @@ the same as `PackageVersion`. Or let
 [`wingetcreate update`](https://github.com/microsoft/winget-create) do it:
 
 ```
-wingetcreate update RicardoFrantz.pdf-next --version 0.14.1 \
-  --urls https://github.com/ricardofrantz/pdf-next/releases/download/v0.14.1/pdf-next_0.14.1_x64-setup.exe \
+wingetcreate update RicardoFrantz.pdf-next --version 0.14.3 \
+  --urls https://github.com/ricardofrantz/pdf-next/releases/download/v0.14.3/pdf-next_0.14.3_x64-setup.exe \
   --submit
 ```
 
