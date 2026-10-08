@@ -295,17 +295,17 @@ function appFunction(name, next, context, source = app) {
       state: { generation: 1, imageScale: 0.3 },
       ui: { imageBox: { offsetWidth: box[0], offsetHeight: box[1] },
         imageStage: { clientWidth: stage[0], clientHeight: stage[1] } },
-      windowResized: async () => {},
+      stageSettled: async () => {},
       stagePadding: () => [0, 0],
       imageContainScale: () => 0.2834,
       setImageScale(value) { calls.push(['scale', value]); },
       trimWindowToContent: async () => { calls.push(['trim']); },
     };
-    await appFunction('shrinkImageToWindow', 'function windowResized(', context)(1);
+    await appFunction('shrinkImageToWindow', 'async function stageSettled(', context)(1);
     return calls;
   };
-  assert.deepEqual(await run([900, 660], [900, 620]), [['scale', 0.283], ['trim']],
-    'A picture taller than its clamped window shrinks into it.');
+  assert.deepEqual(await run([900, 660], [900, 620]), [['scale', 0.283], ['trim'], ['scale', 0.283], ['trim']],
+    'A picture taller than its clamped window shrinks into it, and is checked again.');
   assert.deepEqual(await run([900, 620], [900, 620]), [],
     'A picture that fits its window keeps its scale.');
 }

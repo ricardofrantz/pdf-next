@@ -1073,33 +1073,37 @@ async function stepSibling(delta) {
 /// The opening scale estimates the window frame from the webview. When the
 /// real frame is larger, the screen clamps the window below the picture's
 /// size. Measure the window that resulted, and shrink the picture into it.
+/// A second pass covers a clamp that changed the window again.
 async function shrinkImageToWindow(generation) {
-  await windowResized();
-  if (state.generation !== generation || typeof state.imageScale !== 'number') {
-    return;
+  for (let pass = 0; pass < 2; pass += 1) {
+    await stageSettled();
+    if (state.generation !== generation || typeof state.imageScale !== 'number') {
+      return;
+    }
+    const [padX, padY] = stagePadding();
+    if (ui.imageBox.offsetWidth <= ui.imageStage.clientWidth - padX + 1 &&
+        ui.imageBox.offsetHeight <= ui.imageStage.clientHeight - padY + 1) {
+      return;
+    }
+    const scale = Math.min(state.imageScale, imageContainScale());
+    setImageScale(Math.max(0.01, Math.floor(scale * 1000) / 1000), { refit: false });
+    await trimWindowToContent();
   }
-  const [padX, padY] = stagePadding();
-  if (ui.imageBox.offsetWidth <= ui.imageStage.clientWidth - padX + 1 &&
-      ui.imageBox.offsetHeight <= ui.imageStage.clientHeight - padY + 1) {
-    return;
-  }
-  const scale = Math.min(state.imageScale, imageContainScale());
-  setImageScale(Math.max(0.01, Math.floor(scale * 1000) / 1000), { refit: false });
-  await trimWindowToContent();
 }
 
-/// Resolve after the next resize event has been laid out, or after `ms` when
-/// the window did not change size.
-function windowResized(ms = 250) {
-  return new Promise((resolve) => {
-    const done = () => {
-      window.removeEventListener('resize', done);
-      window.clearTimeout(timer);
-      window.requestAnimationFrame(() => resolve());
-    };
-    const timer = window.setTimeout(done, ms);
-    window.addEventListener('resize', done);
-  });
+/// Resolve when the stage has kept one size for three samples 50 ms apart.
+/// A native resize lands some time after the call that asked for it; macOS
+/// can take longer than one resize event, so the size itself is watched.
+async function stageSettled(limit = 1500) {
+  const deadline = Date.now() + limit;
+  let last = '';
+  let same = 0;
+  while (Date.now() < deadline && same < 3) {
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+    const size = `${ui.imageStage.clientWidth}x${ui.imageStage.clientHeight}`;
+    same = size === last ? same + 1 : 0;
+    last = size;
+  }
 }
 
 async function showImage(file, fit, view, generation) {
