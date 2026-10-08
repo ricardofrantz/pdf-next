@@ -35,8 +35,9 @@ that survives a build deleting and recreating the file mid-compile.
   itself, centred; open a wide figure and the window is wide. It only happens when you open a
   file — rebuilds never move your window. With no file open, it stays a small drop target.
 - **Trims the window to the page** when you open a file. A PDF or figure comes up at 100% and
-  the window hugs it — no band of empty desk on a big screen. A page taller than the monitor
-  clamps to the screen and scrolls. Rebuilds and tab switches leave the window where it is.
+  the window hugs it — no band of empty desk on a big screen. A figure larger than the screen,
+  such as a plot saved at 400 dpi, opens whole: it is scaled down until it fits. A PDF page
+  taller than the monitor clamps to the screen and scrolls. Rebuilds and tab switches leave the window where it is.
   `Ctrl+Shift+F` keeps the window following the content after that.
 - **Dock to any half of the screen** — five toolbar buttons, or `Ctrl+Shift+←` / `→` / `↑` /
   `↓`, fill the left, right, top or bottom half, so the document takes one half and your

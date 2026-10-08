@@ -168,6 +168,43 @@ def png(width: int = 64, height: int = 48) -> bytes:
     )
 
 
+def figure(width: int = 3000, height: int = 2200) -> bytes:
+    """A PNG larger than any screen, like a figure saved at 400 dpi.
+
+    It must open whole, not at 100%. Rows repeat in bands of 100, and
+    PNG's Up filter turns a repeated row into zeros, so the file stays small.
+    """
+
+    def row(y: int) -> bytes:
+        return bytes(
+            value
+            for x in range(width)
+            for value in (x % 64 * 4, y // 100 * 20 % 256, 200)
+        )
+
+    rows = b"".join(
+        bytes([0]) + row(y) if y % 100 == 0 else bytes([2]) + bytes(3 * width)
+        for y in range(height)
+    )
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return (
+            struct.pack(">I", len(data))
+            + body
+            + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+        )
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    signature = bytes([137, 80, 78, 71, 13, 10, 26, 10])
+    return (
+        signature
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows, 9))
+        + chunk(b"IEND", b"")
+    )
+
+
 MARKDOWN = r"""# Smoke test
 
 A heading, a paragraph and some math, so the markdown path draws
@@ -189,6 +226,7 @@ def main() -> None:
         "jbig2.pdf": image_page("jbig2.bin", "JBIG2Decode", 132, 14, 1, "DeviceGray"),
         "jpeg2000.pdf": image_page("jpx.bin", "JPXDecode", 40, 27, 8, "DeviceRGB"),
         "swatch.png": png(),
+        "large-figure.png": figure(),
         "notes.md": MARKDOWN.encode("utf-8"),
     }
     for name, data in written.items():

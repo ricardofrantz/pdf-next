@@ -235,12 +235,54 @@ function appFunction(name, next, context, source = app) {
     sourceUrl: () => 'doc://image',
     setImageRotation() {},
     setImageScale() {},
+    openingImageScale: () => 1,
     restoreImageView() {},
     trimWindowToContent() {},
     scheduleWrap() {},
   });
   await show({ name: 'swatch.png' }, false, null, 1);
   assert.ok(shown);
+}
+
+{
+  // A 400 dpi figure is far larger than the screen. It opens whole, not at 100%.
+  let scaled = null;
+  const show = appFunction('showImage', 'async function openFile(', {
+    state: { generation: 1 },
+    ui: { image: { set src(value) {}, set alt(value) {}, decode: async () => {} } },
+    releaseDocument: async () => {},
+    sourceUrl: () => 'doc://figure',
+    setImageRotation() {},
+    setImageScale(value) { scaled = value; },
+    openingImageScale: (fit) => (fit ? 0.25 : 0.5),
+    restoreImageView() {},
+    trimWindowToContent() {},
+    scheduleWrap() {},
+  });
+  await show({ name: 'figure.png' }, true, null, 1);
+  assert.equal(scaled, 0.25, 'A new figure opens at the scale that fits the screen.');
+  await show({ name: 'figure.png' }, false, null, 1);
+  assert.equal(scaled, 0.5, 'A figure opened into a kept window fits that window.');
+}
+
+{
+  const context = (natural, docked = false) => ({
+    state: { docked, reviewOpen: false },
+    window: { outerWidth: 1000, innerWidth: 1000, outerHeight: 800, innerHeight: 800,
+      screen: { availWidth: 1920, availHeight: 1040 } },
+    REVIEW_PANE_WIDTH: 280,
+    turnedNatural: () => natural,
+    chromeHeight: () => 36,
+    imageContainScale: () => 0.4,
+  });
+  const scale = (natural, fit, docked) =>
+    appFunction('openingImageScale', 'function imageContainScale(', context(natural, docked))(fit);
+  assert.equal(scale([3200, 2400], true), 0.401,
+    'A screen-sized limit leaves room for the frame and the toolbar.');
+  assert.equal(scale([640, 480], true), 1, 'A small picture still opens at 100%.');
+  assert.equal(scale([3200, 2400], false), 0.4, 'A kept window limits the picture to its stage.');
+  assert.equal(scale([3200, 2400], true, true), 0.4, 'A docked window limits the picture to its stage.');
+  assert.equal(scale([0, 0], true), 1, 'An undecoded picture keeps 100%.');
 }
 
 {
@@ -1894,6 +1936,7 @@ for (const fixture of [
   'tests/fixtures/jbig2.pdf',
   'tests/fixtures/jpeg2000.pdf',
   'tests/fixtures/swatch.png',
+  'tests/fixtures/large-figure.png',
   'tests/fixtures/notes.md',
 ]) {
   await access(fixture);

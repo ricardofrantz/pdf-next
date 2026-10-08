@@ -471,6 +471,32 @@ function imageScale() {
   return natural ? ui.image.offsetWidth / natural : 1;
 }
 
+/// The scale a picture opens at: 100%, or less when 100% would not fit. A new
+/// window is then sized to the picture, so the screen is the limit. A kept or
+/// docked window does not change size, so its stage is the limit.
+function openingImageScale(fit) {
+  const [width, height] = turnedNatural();
+  if (!width || !height) {
+    return 1;
+  }
+  let scale;
+  if (!fit || state.docked) {
+    scale = imageContainScale();
+  } else {
+    // The title bar and borders come off the work area too. WebKitGTK reports
+    // no frame, so assume at least a usual one rather than overshoot.
+    const frameX = Math.max(16, window.outerWidth - window.innerWidth);
+    const frameY = Math.max(40, window.outerHeight - window.innerHeight);
+    const pane = state.reviewOpen ? REVIEW_PANE_WIDTH : 0;
+    scale = Math.min(
+      (window.screen.availWidth - frameX - pane) / width,
+      (window.screen.availHeight - frameY - chromeHeight()) / height,
+    );
+  }
+  // Round down, so a rounded-up box never raises a scrollbar.
+  return Math.max(0.01, Math.min(1, Math.floor(scale * 1000) / 1000));
+}
+
 /// The scale at which the whole image fits inside the stage, both axes.
 function imageContainScale() {
   const [width, height] = turnedNatural();
@@ -1063,7 +1089,7 @@ async function showImage(file, fit, view, generation) {
   if (view) {
     restoreImageView(view);
   } else {
-    setImageScale(1, { refit: false });
+    setImageScale(openingImageScale(fit), { refit: false });
   }
   if (fit) {
     await trimWindowToContent({ recenter: true });
@@ -4564,11 +4590,17 @@ async function reportSmoke() {
           ? (ui.markdownRaw?.textContent || '').trim().length > 0
           : (ui.markdown?.textContent || '').trim().length > 0,
     );
+    // A new picture opens whole: the window wraps it, and no part of it
+    // needs a scroll. The resize lands after the open, so wait for it.
+    const whole = file.kind !== 'image' || await settles(() =>
+      ui.imageBox.offsetWidth <= ui.imageStage.clientWidth + 1 &&
+      ui.imageBox.offsetHeight <= ui.imageStage.clientHeight + 1, 5_000);
+    const scaleNote = file.kind === 'image' ? `, scale ${imageScale().toFixed(3)}` : '';
     await invoke('smoke_report', {
-      ok: shown && failures.length === 0,
-      detail: shown && failures.length === 0
-        ? `${file.name} rendered (${file.kind})`
-        : `${file.name} did not render (${file.kind})${note()}`,
+      ok: shown && whole && failures.length === 0,
+      detail: shown && whole && failures.length === 0
+        ? `${file.name} rendered (${file.kind})${scaleNote}`
+        : `${file.name} did not render${shown && !whole ? ' whole' : ''} (${file.kind})${scaleNote}${note()}`,
     });
   } catch (error) {
     if (!currentReport()) return;
