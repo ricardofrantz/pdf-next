@@ -59,10 +59,12 @@ choice, not the content), and the user's `PATH`.
   opening the file.
 - High: script running in the webview from a file (CSP bypass, Markdown sanitizer
   bypass, DOM injection); a Tauri command that a compromised webview can use to read,
-  list, write or delete files outside the allowed set, or to open a URL or scheme that
-  the command should refuse; running a `synctex` planted next to the document.
+  write or delete files outside the allowed set, or to open a URL or scheme that the
+  command should refuse; running a `synctex` planted next to the document.
 - Medium: the same as High but needing a further click on something the user would not
-  expect to be dangerous; leaking a local path or file content to the network; a
+  expect to be dangerous; listing file names outside the allowed set (`siblings` lists
+  files of the same kind in a folder by design, for stepping through figures, so say
+  what more it reveals); leaking a local path or file content to the network; a
   crafted `_review.json` that corrupts other review data.
 - Low: a file that crashes or freezes the viewer; very high memory use from one file;
   spoofed UI inside the window.
