@@ -304,8 +304,8 @@ function appFunction(name, next, context, source = app) {
     await appFunction('shrinkImageToWindow', 'async function stageSettled(', context)(1);
     return calls;
   };
-  assert.deepEqual(await run([900, 660], [900, 620]), [['scale', 0.283], ['trim'], ['scale', 0.283], ['trim']],
-    'A picture taller than its clamped window shrinks into it, and is checked again.');
+  assert.deepEqual(await run([900, 660], [900, 620]), [['scale', 0.283]],
+    'A picture taller than its clamped window shrinks into it, and the window keeps its size.');
   assert.deepEqual(await run([900, 620], [900, 620]), [],
     'A picture that fits its window keeps its scale.');
 }

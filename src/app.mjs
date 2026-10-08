@@ -1071,24 +1071,22 @@ async function stepSibling(delta) {
 }
 
 /// The opening scale estimates the window frame from the webview. When the
-/// real frame is larger, the screen clamps the window below the picture's
-/// size. Measure the window that resulted, and shrink the picture into it.
-/// A second pass covers a clamp that changed the window again.
+/// real frame is larger, the window comes out smaller than the picture.
+/// Measure the window that resulted and shrink the picture into it. The
+/// window is not trimmed again: on macOS each trim lands 32 px short, so a
+/// second trim would clip the picture again.
 async function shrinkImageToWindow(generation) {
-  for (let pass = 0; pass < 2; pass += 1) {
-    await stageSettled();
-    if (state.generation !== generation || typeof state.imageScale !== 'number') {
-      return;
-    }
-    const [padX, padY] = stagePadding();
-    if (ui.imageBox.offsetWidth <= ui.imageStage.clientWidth - padX + 1 &&
-        ui.imageBox.offsetHeight <= ui.imageStage.clientHeight - padY + 1) {
-      return;
-    }
-    const scale = Math.min(state.imageScale, imageContainScale());
-    setImageScale(Math.max(0.01, Math.floor(scale * 1000) / 1000), { refit: false });
-    await trimWindowToContent();
+  await stageSettled();
+  if (state.generation !== generation || typeof state.imageScale !== 'number') {
+    return;
   }
+  const [padX, padY] = stagePadding();
+  if (ui.imageBox.offsetWidth <= ui.imageStage.clientWidth - padX + 1 &&
+      ui.imageBox.offsetHeight <= ui.imageStage.clientHeight - padY + 1) {
+    return;
+  }
+  const scale = Math.min(state.imageScale, imageContainScale());
+  setImageScale(Math.max(0.01, Math.floor(scale * 1000) / 1000), { refit: false });
 }
 
 /// Resolve when the stage has kept one size for three samples 50 ms apart.
