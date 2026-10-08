@@ -236,6 +236,7 @@ function appFunction(name, next, context, source = app) {
     setImageRotation() {},
     setImageScale() {},
     openingImageScale: () => 1,
+    shrinkImageToWindow: async () => {},
     restoreImageView() {},
     trimWindowToContent() {},
     scheduleWrap() {},
@@ -255,6 +256,7 @@ function appFunction(name, next, context, source = app) {
     setImageRotation() {},
     setImageScale(value) { scaled = value; },
     openingImageScale: (fit) => (fit ? 0.25 : 0.5),
+    shrinkImageToWindow: async () => {},
     restoreImageView() {},
     trimWindowToContent() {},
     scheduleWrap() {},
@@ -283,6 +285,29 @@ function appFunction(name, next, context, source = app) {
   assert.equal(scale([3200, 2400], false), 0.4, 'A kept window limits the picture to its stage.');
   assert.equal(scale([3200, 2400], true, true), 0.4, 'A docked window limits the picture to its stage.');
   assert.equal(scale([0, 0], true), 1, 'An undecoded picture keeps 100%.');
+}
+
+{
+  // The window frame was larger than estimated, so the screen clamped the window.
+  const run = async (box, stage) => {
+    const calls = [];
+    const context = {
+      state: { generation: 1, imageScale: 0.3 },
+      ui: { imageBox: { offsetWidth: box[0], offsetHeight: box[1] },
+        imageStage: { clientWidth: stage[0], clientHeight: stage[1] } },
+      windowResized: async () => {},
+      stagePadding: () => [0, 0],
+      imageContainScale: () => 0.2834,
+      setImageScale(value) { calls.push(['scale', value]); },
+      trimWindowToContent: async () => { calls.push(['trim']); },
+    };
+    await appFunction('shrinkImageToWindow', 'function windowResized(', context)(1);
+    return calls;
+  };
+  assert.deepEqual(await run([900, 660], [900, 620]), [['scale', 0.283], ['trim']],
+    'A picture taller than its clamped window shrinks into it.');
+  assert.deepEqual(await run([900, 620], [900, 620]), [],
+    'A picture that fits its window keeps its scale.');
 }
 
 {

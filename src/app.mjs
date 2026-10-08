@@ -1070,6 +1070,38 @@ async function stepSibling(delta) {
   }
 }
 
+/// The opening scale estimates the window frame from the webview. When the
+/// real frame is larger, the screen clamps the window below the picture's
+/// size. Measure the window that resulted, and shrink the picture into it.
+async function shrinkImageToWindow(generation) {
+  await windowResized();
+  if (state.generation !== generation || typeof state.imageScale !== 'number') {
+    return;
+  }
+  const [padX, padY] = stagePadding();
+  if (ui.imageBox.offsetWidth <= ui.imageStage.clientWidth - padX + 1 &&
+      ui.imageBox.offsetHeight <= ui.imageStage.clientHeight - padY + 1) {
+    return;
+  }
+  const scale = Math.min(state.imageScale, imageContainScale());
+  setImageScale(Math.max(0.01, Math.floor(scale * 1000) / 1000), { refit: false });
+  await trimWindowToContent();
+}
+
+/// Resolve after the next resize event has been laid out, or after `ms` when
+/// the window did not change size.
+function windowResized(ms = 250) {
+  return new Promise((resolve) => {
+    const done = () => {
+      window.removeEventListener('resize', done);
+      window.clearTimeout(timer);
+      window.requestAnimationFrame(() => resolve());
+    };
+    const timer = window.setTimeout(done, ms);
+    window.addEventListener('resize', done);
+  });
+}
+
 async function showImage(file, fit, view, generation) {
   await releaseDocument();
   if (state.generation !== generation) {
@@ -1093,6 +1125,9 @@ async function showImage(file, fit, view, generation) {
   }
   if (fit) {
     await trimWindowToContent({ recenter: true });
+    if (!view) {
+      await shrinkImageToWindow(generation);
+    }
   }
   scheduleWrap();
 }
@@ -4600,7 +4635,10 @@ async function reportSmoke() {
       ok: shown && whole && failures.length === 0,
       detail: shown && whole && failures.length === 0
         ? `${file.name} rendered (${file.kind})${scaleNote}`
-        : `${file.name} did not render${shown && !whole ? ' whole' : ''} (${file.kind})${scaleNote}${note()}`,
+        : `${file.name} did not render${shown && !whole ? ' whole' : ''} (${file.kind})${scaleNote}${
+          shown && !whole
+            ? `; box ${ui.imageBox.offsetWidth}x${ui.imageBox.offsetHeight}, stage ${ui.imageStage.clientWidth}x${ui.imageStage.clientHeight}, inner ${window.innerWidth}x${window.innerHeight}, outer ${window.outerWidth}x${window.outerHeight}, screen ${window.screen.availWidth}x${window.screen.availHeight}`
+            : ''}${note()}`,
     });
   } catch (error) {
     if (!currentReport()) return;
