@@ -473,3 +473,14 @@ it current, and gets out of the way.
 
 MIT licensed. Built on [Mozilla PDF.js](https://github.com/mozilla/pdf.js) and
 [Tauri](https://tauri.app).
+
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind. To the extent
+permitted by law, the authors and contributors are not liable for any damage, loss
+or claim arising from its use or misuse. You are responsible for how you use it and
+for following the laws and rules that apply to you. The full terms are in
+[LICENSE](LICENSE).
+
+pdf-next is not affiliated with or endorsed by Mozilla. PDF.js is © Mozilla and
+contributors, under the Apache License 2.0.
